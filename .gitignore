@@ -1,0 +1,7 @@
+results/*.json
+reports/*.xlsx
+reports/*.html
+config/nodes.yaml
+__pycache__/
+*.pyc
+.env

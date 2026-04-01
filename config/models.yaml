@@ -1,0 +1,76 @@
+# Model assignments per node
+# vram_required is approximate at Q4 quant
+
+models:
+  # Models runnable on all nodes
+  common:
+    - name: qwen2.5-coder:7b
+      ollama_tag: qwen2.5-coder:7b
+      vram_gb: 5
+    - name: qwen2.5-coder:14b
+      ollama_tag: qwen2.5-coder:14b
+      vram_gb: 9
+    - name: qwen3.5:9b
+      ollama_tag: qwen3.5:9b
+      vram_gb: 6
+
+  # Needs 20GB+ VRAM or unified memory
+  mid_tier:
+    - name: qwen2.5-coder:32b
+      ollama_tag: qwen2.5-coder:32b
+      vram_gb: 20
+    - name: qwen3.5:27b
+      ollama_tag: qwen3.5:27b
+      vram_gb: 17
+    - name: qwen3.5:35b-a3b
+      ollama_tag: qwen3.5:35b-a3b
+      vram_gb: 24
+      notes: "MoE — only 3B active, very efficient"
+
+  # Large models — unified memory nodes only (Strix/GB10)
+  large:
+    - name: qwen3.5:72b
+      ollama_tag: qwen3.5:72b-q4_K_M
+      vram_gb: 46
+      nodes: [bosgame-m5, lenovo-gb10]
+    - name: qwen3-coder-next:80b
+      ollama_tag: qwen3-coder-next:80b-a3b-q4_K_M
+      vram_gb: 46
+      nodes: [bosgame-m5, lenovo-gb10]
+      notes: "MoE — 3B active params, key agentic benchmark"
+    - name: qwen3.5:122b-a10b
+      ollama_tag: qwen3.5:122b-a10b-q4_K_M
+      vram_gb: 70
+      nodes: [bosgame-m5, lenovo-gb10]
+      notes: "Stretch target — check memory headroom first"
+
+# Per-node model assignments (generated from above)
+node_models:
+  nvidia-ai:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:14b
+    - qwen3.5:9b
+    - qwen2.5-coder:32b
+    - qwen3.5:35b-a3b
+
+  bosgame-m5:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:14b
+    - qwen3.5:9b
+    - qwen2.5-coder:32b
+    - qwen3.5:27b
+    - qwen3.5:35b-a3b
+    - qwen3.5:72b
+    - qwen3-coder-next:80b
+    - qwen3.5:122b-a10b
+
+  lenovo-gb10:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:14b
+    - qwen3.5:9b
+    - qwen2.5-coder:32b
+    - qwen3.5:27b
+    - qwen3.5:35b-a3b
+    - qwen3.5:72b
+    - qwen3-coder-next:80b
+    - qwen3.5:122b-a10b

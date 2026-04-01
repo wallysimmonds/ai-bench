@@ -1,0 +1,21 @@
+nodes:
+  nvidia-ai:
+    host: "192.168.1.XX"
+    user: "johanus"
+    ssh_key: "~/.ssh/id_ed25519"
+    ollama_port: 11434
+    type: x86
+
+  bosgame-m5:
+    host: "192.168.1.XX"
+    user: "brendan"
+    ssh_key: "~/.ssh/id_ed25519"
+    ollama_port: 11434
+    type: unified_amd
+
+  lenovo-gb10:
+    host: "192.168.1.XX"
+    user: "ubuntu"
+    ssh_key: "~/.ssh/id_ed25519"
+    ollama_port: 11434
+    type: unified_arm
