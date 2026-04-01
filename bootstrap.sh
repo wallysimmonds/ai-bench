@@ -39,11 +39,12 @@ if [ "$SKIP_MODELS" = false ] && [ "$DRY_RUN" = false ] && [ -z "$TMUX" ]; then
     sudo apt-get install -y tmux -q
   fi
   echo ""
-  echo "  Relaunching inside tmux session 'bootstrap' to survive SSH disconnects."
+  echo "  Launching inside tmux session 'bootstrap' to survive SSH disconnects."
   echo "  To reattach if disconnected: tmux attach -t bootstrap"
   echo ""
-  sleep 2
-  exec tmux new-session -s bootstrap "$0 $*"
+  sleep 1
+  tmux new-session -s bootstrap "bash $0 $*; echo '--- bootstrap complete, press enter to close ---'; read"
+  exit 0
 fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
