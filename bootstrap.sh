@@ -173,7 +173,8 @@ ok "Ollama up to date"
 OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
 MODELS_PATH="$HOME/ollama-models"
-run mkdir -p "$MODELS_PATH"
+run sudo mkdir -p "$MODELS_PATH"
+run sudo chown "$USER":"$USER" "$MODELS_PATH"
 
 case "$NODE_TYPE" in
   strix|amd_unified)
