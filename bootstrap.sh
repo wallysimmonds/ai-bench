@@ -5,31 +5,52 @@
 # Detects hardware automatically and configures accordingly.
 #
 # Usage (fresh machine):
-#   git clone https://YOUR_PAT@github.com/wallysimmonds/ai-bench.git
+#   git clone https://github.com/wallysimmonds/ai-bench.git
 #   cd ai-bench && ./bootstrap.sh
 #
-# Usage (test on existing machine):
-#   ./bootstrap.sh --dry-run     # shows what it would do, changes nothing
-#   ./bootstrap.sh --skip-models # skips model pulls (fast config-only run)
+# Flags:
+#   --dry-run          show what would happen, change nothing
+#   --skip-models      skip model pulls (fast config-only run)
+#   --with-webui       deploy Open WebUI in Docker after Ollama setup
+#   --teardown-docker  stop/remove existing Docker Ollama container first
 
 set -e
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 DRY_RUN=false
 SKIP_MODELS=false
+WITH_WEBUI=false
+TEARDOWN_DOCKER=false
+
 for arg in "$@"; do
   case $arg in
-    --dry-run)     DRY_RUN=true ;;
-    --skip-models) SKIP_MODELS=true ;;
+    --dry-run)         DRY_RUN=true ;;
+    --skip-models)     SKIP_MODELS=true ;;
+    --with-webui)      WITH_WEBUI=true ;;
+    --teardown-docker) TEARDOWN_DOCKER=true ;;
   esac
 done
+
+# ── tmux guard ───────────────────────────────────────────────────────────────
+# Relaunch inside tmux so SSH disconnects don't kill long model pulls
+if [ "$SKIP_MODELS" = false ] && [ "$DRY_RUN" = false ] && [ -z "$TMUX" ]; then
+  if ! command -v tmux &>/dev/null; then
+    echo "  Installing tmux..."
+    sudo apt-get install -y tmux -q
+  fi
+  echo ""
+  echo "  Relaunching inside tmux session 'bootstrap' to survive SSH disconnects."
+  echo "  To reattach if disconnected: tmux attach -t bootstrap"
+  echo ""
+  sleep 2
+  exec tmux new-session -s bootstrap "$0 $*"
+fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 log()  { echo "  $1"; }
 ok()   { echo "  ✓ $1"; }
 skip() { echo "  ~ $1 (already done)"; }
 warn() { echo "  ⚠ $1"; }
-die()  { echo "  ✗ $1"; exit 1; }
 run()  { if $DRY_RUN; then echo "  [dry-run] $*"; else "$@"; fi; }
 
 section() {
@@ -43,16 +64,15 @@ section "Hardware Detection"
 ARCH=$(uname -m)
 log "Architecture: $ARCH"
 
-# GPU detection
 HAS_NVIDIA=false
 HAS_AMD=false
 NODE_TYPE="cpu"
+NODE_NAME="unknown-node"
 
 if command -v nvidia-smi &>/dev/null; then
   GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "")
   if [ -n "$GPU_INFO" ]; then
     HAS_NVIDIA=true
-    NODE_TYPE="nvidia"
     log "NVIDIA GPU(s) detected:"
     echo "$GPU_INFO" | while read line; do log "  $line"; done
   fi
@@ -61,12 +81,10 @@ fi
 if [ "$HAS_NVIDIA" = false ] && command -v rocminfo &>/dev/null; then
   if rocminfo 2>/dev/null | grep -q "Device Type.*GPU"; then
     HAS_AMD=true
-    NODE_TYPE="amd_unified"
     log "AMD GPU detected (ROCm)"
   fi
 fi
 
-# Unified memory detection (Strix Halo / GB10)
 TOTAL_MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
 log "System memory: ${TOTAL_MEM_GB}GB"
 
@@ -78,16 +96,48 @@ if [ "$TOTAL_MEM_GB" -ge 100 ]; then
   elif [ "$HAS_AMD" = true ]; then
     NODE_TYPE="strix"
     NODE_NAME="bosgame-m5"
+  else
+    NODE_TYPE="unified"
+    NODE_NAME="unified-node"
   fi
 elif [ "$HAS_NVIDIA" = true ]; then
   NODE_TYPE="nvidia"
   NODE_NAME="nvidia-ai"
 else
-  NODE_NAME="unknown-node"
   warn "Could not identify node type — defaulting to CPU-only config"
 fi
 
 ok "Node type: $NODE_TYPE ($NODE_NAME)"
+
+# ── Docker teardown (optional) ────────────────────────────────────────────────
+section "Docker Check"
+
+if command -v docker &>/dev/null; then
+  # Find containers using port 11434
+  DOCKER_OLLAMA=$(sudo docker ps --format "{{.Names}}\t{{.Ports}}" 2>/dev/null | \
+    grep "11434" | awk '{print $1}' | head -1 || echo "")
+
+  if [ -n "$DOCKER_OLLAMA" ]; then
+    warn "Docker container using port 11434: $DOCKER_OLLAMA"
+    if $TEARDOWN_DOCKER; then
+      log "Stopping and removing: $DOCKER_OLLAMA"
+      run sudo docker stop "$DOCKER_OLLAMA"
+      run sudo docker rm "$DOCKER_OLLAMA"
+      # Remove associated volume if it exists
+      if sudo docker volume ls -q 2>/dev/null | grep -q "^${DOCKER_OLLAMA}$"; then
+        run sudo docker volume rm "$DOCKER_OLLAMA"
+        ok "Volume removed"
+      fi
+      ok "Docker container removed — port 11434 now free"
+    else
+      warn "Pass --teardown-docker to remove it (port conflict will prevent native Ollama)"
+    fi
+  else
+    skip "No Docker container on port 11434"
+  fi
+else
+  skip "Docker not installed"
+fi
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 section "Python Dependencies"
@@ -103,34 +153,24 @@ fi
 # ── Ollama ────────────────────────────────────────────────────────────────────
 section "Ollama"
 
+# Run install script every time — it handles upgrades idempotently
+# Important for gpt-oss:120b which needs latest Ollama for MXFP4 support
 if command -v ollama &>/dev/null; then
-  OLLAMA_VER=$(ollama --version 2>/dev/null || echo "unknown")
-  skip "Ollama already installed ($OLLAMA_VER)"
+  log "Ollama $(ollama --version 2>/dev/null) — checking for updates..."
 else
   log "Installing Ollama..."
-  if $DRY_RUN; then
-    echo "  [dry-run] curl -fsSL https://ollama.com/install.sh | sh"
-  else
-    curl -fsSL https://ollama.com/install.sh | sh
-  fi
-  ok "Ollama installed"
 fi
 
-# Systemd override — idempotent (only writes if content differs)
+if $DRY_RUN; then
+  echo "  [dry-run] curl -fsSL https://ollama.com/install.sh | sh"
+else
+  curl -fsSL https://ollama.com/install.sh | sh
+fi
+ok "Ollama up to date"
+
+# Systemd override — idempotent, only writes if changed
 OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
-
-build_override() {
-  local models_path="$1"
-  local extra="$2"
-  cat << EOF
-[Service]
-Environment="OLLAMA_MODELS=$models_path"
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-$extra
-EOF
-}
-
 MODELS_PATH="$HOME/ollama-models"
 run mkdir -p "$MODELS_PATH"
 
@@ -143,7 +183,11 @@ case "$NODE_TYPE" in
     ;;
 esac
 
-DESIRED_OVERRIDE=$(build_override "$MODELS_PATH" "$EXTRA")
+DESIRED_OVERRIDE="[Service]
+Environment=\"OLLAMA_MODELS=$MODELS_PATH\"
+Environment=\"OLLAMA_HOST=0.0.0.0:11434\"
+$EXTRA"
+
 CURRENT_OVERRIDE=$(cat "$OVERRIDE_FILE" 2>/dev/null || echo "")
 
 if [ "$DESIRED_OVERRIDE" = "$CURRENT_OVERRIDE" ]; then
@@ -152,7 +196,7 @@ else
   log "Writing Ollama systemd override..."
   run sudo mkdir -p "$OVERRIDE_DIR"
   if ! $DRY_RUN; then
-    echo "$DESIRED_OVERRIDE" | sudo tee "$OVERRIDE_FILE" > /dev/null
+    printf '%s\n' "$DESIRED_OVERRIDE" | sudo tee "$OVERRIDE_FILE" > /dev/null
   fi
   run sudo systemctl daemon-reload
   run sudo systemctl restart ollama
@@ -160,7 +204,6 @@ else
   ok "Ollama service configured"
 fi
 
-# Ensure Ollama is running
 if ! systemctl is-active --quiet ollama 2>/dev/null; then
   log "Starting Ollama service..."
   run sudo systemctl enable --now ollama
@@ -174,7 +217,7 @@ section "Node Config"
 if [ ! -f config/nodes.yaml ]; then
   if [ -f config/nodes.yaml.example ]; then
     run cp config/nodes.yaml.example config/nodes.yaml
-    warn "Created config/nodes.yaml from example — update IPs before running benchmarks"
+    warn "Created config/nodes.yaml from example — update IPs before benchmarking"
   fi
 else
   skip "config/nodes.yaml already exists"
@@ -186,30 +229,36 @@ section "Models"
 if $SKIP_MODELS; then
   warn "Skipping model pulls (--skip-models)"
 else
-  # Common models — all nodes
+
+  # Models are pulled to disk and benchmarked individually — not loaded concurrently
+
+  # Common — all nodes
   COMMON_MODELS=(
-    "qwen2.5-coder:7b"
-    "qwen2.5-coder:14b"
-    "qwen3.5:9b"
+    "qwen2.5-coder:7b"      # 5GB  — smoke test / fast iteration
+    "qwen2.5-coder:14b"     # 9GB  — mid small
+    "qwen3.5:9b"            # 6GB  — latest gen small
   )
 
-  # Mid-tier — needs 20GB+ VRAM or unified memory
+  # Mid-tier — nvidia node (~40GB VRAM)
   MID_MODELS=(
-    "qwen2.5-coder:32b"
-    "qwen3.5:35b-a3b"
+    "qwen2.5-coder:32b"     # 20GB — strong coder
+    "qwen3.5:35b-a3b"       # 24GB — MoE, 3B active, very efficient
   )
 
-  # Large — unified memory nodes only
+  # Large — unified memory nodes only (128GB)
   LARGE_MODELS=(
-    "qwen3.5:27b"
-    "qwen3.5:72b"
-    "qwen3-coder-next:80b-a3b-q4_K_M"
+    "qwen3.5:27b"           # 17GB — general purpose baseline
+    "qwen3.5:35b-a3b"       # 24GB — MoE efficiency reference
+    "qwen3-coder-next"      # 48GB — key agentic coding benchmark (3B active)
+    "gpt-oss:120b"          # 80GB — OpenAI open weight, MXFP4, needs latest Ollama
+    "qwen3.5:122b"          # 81GB — flagship, tight on 128GB, pull last
   )
 
   pull_if_missing() {
     local model="$1"
-    if ollama list 2>/dev/null | grep -q "^${model}"; then
-      skip "Model already pulled: $model"
+    local model_base="${model%%:*}"
+    if ollama list 2>/dev/null | grep -q "$model_base"; then
+      skip "Already pulled: $model"
     else
       log "Pulling: $model"
       run ollama pull "$model"
@@ -217,17 +266,17 @@ else
     fi
   }
 
-  log "Pulling common models (all nodes)..."
+  log "Pulling common models..."
   for m in "${COMMON_MODELS[@]}"; do pull_if_missing "$m"; done
 
-  # Smoke test before large pulls
+  # Smoke test before committing to large downloads
   if ! $DRY_RUN; then
     log "Smoke testing qwen2.5-coder:7b..."
     SMOKE=$(ollama run qwen2.5-coder:7b "respond with only the word: ok" --nowordwrap 2>/dev/null | tr -d '[:space:]')
-    if [ "$SMOKE" = "ok" ]; then
+    if echo "$SMOKE" | grep -qi "ok"; then
       ok "Smoke test passed"
     else
-      warn "Smoke test response: '$SMOKE' (not exactly 'ok' — may still be working)"
+      warn "Smoke test response: '$SMOKE' — may still be fine, continuing..."
     fi
   fi
 
@@ -236,16 +285,44 @@ else
       log "Pulling mid-tier models (NVIDIA ~40GB VRAM)..."
       for m in "${MID_MODELS[@]}"; do pull_if_missing "$m"; done
       ;;
-    strix|gb10|amd_unified|unified_arm)
+    strix|gb10|unified)
       log "Pulling mid-tier models..."
       for m in "${MID_MODELS[@]}"; do pull_if_missing "$m"; done
-      log "Pulling large models (unified memory node)..."
+      log "Pulling large models (128GB unified memory)..."
+      log "Note: ~250GB total — this will take a while on first run"
       for m in "${LARGE_MODELS[@]}"; do pull_if_missing "$m"; done
       ;;
     *)
-      warn "Unknown node type — skipping mid/large model pulls"
+      warn "Unknown node type — only common models pulled"
       ;;
   esac
+fi
+
+# ── Open WebUI (optional) ─────────────────────────────────────────────────────
+section "Open WebUI"
+
+if $WITH_WEBUI; then
+  if ! command -v docker &>/dev/null; then
+    warn "Docker not installed — skipping Open WebUI"
+    warn "Install: https://docs.docker.com/engine/install/ubuntu/"
+  else
+    if sudo docker ps --format "{{.Names}}" 2>/dev/null | grep -q "^open-webui$"; then
+      skip "Open WebUI already running"
+    else
+      log "Deploying Open WebUI (standalone UI, native Ollama backend)..."
+      run sudo docker run -d \
+        --name open-webui \
+        --restart always \
+        -p 8080:8080 \
+        -v open-webui:/app/backend/data \
+        -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+        --add-host=host.docker.internal:host-gateway \
+        ghcr.io/open-webui/open-webui:main
+      ok "Open WebUI deployed → http://$(hostname -I | awk '{print $1}'):8080"
+    fi
+  fi
+else
+  skip "Open WebUI not requested (pass --with-webui to deploy)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -255,7 +332,10 @@ echo ""
 echo "  Node:      $NODE_NAME ($NODE_TYPE)"
 echo "  Arch:      $ARCH"
 echo "  Memory:    ${TOTAL_MEM_GB}GB"
-echo "  Models:    $(ollama list 2>/dev/null | tail -n +2 | wc -l) installed"
+if ! $DRY_RUN; then
+  MODEL_COUNT=$(ollama list 2>/dev/null | tail -n +2 | wc -l)
+  echo "  Models:    $MODEL_COUNT pulled"
+fi
 echo ""
 
 if [ -f config/nodes.yaml ]; then
@@ -266,9 +346,14 @@ if [ -f config/nodes.yaml ]; then
 fi
 
 echo "  Next steps:"
-echo "    Update config/nodes.yaml with node IPs"
+echo "    Edit config/nodes.yaml with node IPs"
 echo "    python scripts/benchmark.py --node $NODE_NAME --suite standard"
 echo "    python scripts/report_html.py --results results/"
+echo ""
+echo "  Re-run options:"
+echo "    ./bootstrap.sh --skip-models           # config/Ollama update only"
+echo "    ./bootstrap.sh --with-webui            # add Open WebUI"
+echo "    ./bootstrap.sh --teardown-docker       # remove Docker Ollama first"
 echo ""
 
 if $DRY_RUN; then
