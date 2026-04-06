@@ -2,8 +2,15 @@
 """
 benchmark.py — Core benchmark runner for ai-bench fleet
 
+Metrics captured:
+  - tg (token generation): tokens/sec during generation phase
+  - pp (prompt processing): tokens/sec during prefill phase
+  - TTFT: time to first token (ms)
+
+For standardised pp512/tg128 numbers use scripts/llama_bench.sh instead.
+
 Usage:
-    python scripts/benchmark.py --node nvidia-ai --suite standard
+    python scripts/benchmark.py --node lenovo-gb10 --suite standard
     python scripts/benchmark.py --node bosgame-m5 --suite coding
     python scripts/benchmark.py --all --suite standard
     python scripts/benchmark.py --node lenovo-gb10 --model qwen3.5:27b
@@ -12,6 +19,8 @@ Usage:
 import argparse
 import json
 import time
+import threading
+import queue
 import requests
 import yaml
 import os
@@ -24,10 +33,72 @@ CONFIG_DIR = ROOT / "config"
 RESULTS_DIR = ROOT / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
-# ── Benchmark prompts ────────────────────────────────────────────────────────
+# ── Per-model timeout overrides ───────────────────────────────────────────────
+# Large models are slow — give them more time per test.
+# Format: substring match → timeout in seconds
+MODEL_TIMEOUTS = {
+    "122b":  600,
+    "120b":  600,
+    "80b":   480,
+    "72b":   480,
+    "70b":   480,
+    "35b":   240,
+    "32b":   240,
+    "27b":   240,
+    "14b":   180,
+}
+
+def get_model_timeout(model_name, default=120):
+    for key, val in MODEL_TIMEOUTS.items():
+        if key in model_name:
+            return val
+    return default
+
+# ── Thinking model detection ──────────────────────────────────────────────────
+# These models run extended chain-of-thought by default.
+# think:false disables it for fair throughput comparison.
+THINKING_MODELS = {
+    "qwen3.5",
+    "qwen3-coder-next",
+    "deepseek-r1",
+}
+
+def is_thinking_model(model_name):
+    return any(t in model_name.lower() for t in THINKING_MODELS)
+
+# ── Benchmark suites ──────────────────────────────────────────────────────────
 
 SUITES = {
     "standard": [
+        {
+            "id": "pp_512",
+            "name": "Prefill — 512 token prompt",
+            "prompt": (
+                "You are a senior infrastructure architect. Your task is to write a "
+                "detailed technical design document. Consider the following requirements carefully "
+                "before responding. The system must handle 10,000 concurrent users, provide "
+                "sub-100ms latency at the 99th percentile, support multi-region active-active "
+                "deployment across at least three geographic regions, implement zero-downtime "
+                "deployments with automated rollback capabilities, maintain 99.99% availability "
+                "SLA, support horizontal scaling with auto-scaling policies, implement "
+                "comprehensive observability including distributed tracing, metrics aggregation, "
+                "and centralised logging, provide end-to-end encryption for all data in transit "
+                "and at rest, support RBAC with fine-grained permissions, integrate with existing "
+                "enterprise identity providers via SAML 2.0 and OIDC, implement rate limiting and "
+                "DDoS protection at the edge, support blue-green and canary deployment strategies, "
+                "maintain full audit trails for compliance, and implement chaos engineering "
+                "practices. Given all these requirements, describe the high-level architecture."
+            ),
+            "num_predict": 128,
+            "measure": "pp",
+        },
+        {
+            "id": "tg_128",
+            "name": "Generation — 128 tokens",
+            "prompt": "Write a Python function to perform binary search on a sorted list.",
+            "num_predict": 128,
+            "measure": "tg",
+        },
         {
             "id": "ttft_short",
             "name": "TTFT — Short prompt",
@@ -37,19 +108,33 @@ SUITES = {
         {
             "id": "ttft_long",
             "name": "TTFT — Long context prompt",
-            "prompt": "You are a senior infrastructure architect. Explain in detail the differences between Azure ExpressRoute and VPN Gateway, covering bandwidth, latency, reliability, cost model, and typical enterprise use cases. Be thorough.",
+            "prompt": (
+                "You are a senior infrastructure architect. Explain in detail the differences "
+                "between Azure ExpressRoute and VPN Gateway, covering bandwidth, latency, "
+                "reliability, cost model, and typical enterprise use cases. Be thorough."
+            ),
             "measure": "ttft",
         },
         {
             "id": "throughput_medium",
             "name": "Throughput — Medium generation",
-            "prompt": "Write a Python FastAPI endpoint that accepts a JSON body with fields: query (string), top_k (int, default 5), and returns a list of document chunks from a vector store. Include proper error handling, Pydantic models, and comments.",
+            "prompt": (
+                "Write a Python FastAPI endpoint that accepts a JSON body with fields: "
+                "query (string), top_k (int, default 5), and returns a list of document "
+                "chunks from a vector store. Include proper error handling, Pydantic models, "
+                "and comments."
+            ),
             "measure": "throughput",
         },
         {
             "id": "throughput_long",
             "name": "Throughput — Long generation",
-            "prompt": "Write a complete Bicep template to deploy an Azure Container App with: a container registry, managed identity, key vault reference for secrets, a storage account with blob container, and all necessary role assignments. Include parameters for environment (dev/prod) and resource naming conventions.",
+            "prompt": (
+                "Write a complete Bicep template to deploy an Azure Container App with: "
+                "a container registry, managed identity, key vault reference for secrets, "
+                "a storage account with blob container, and all necessary role assignments. "
+                "Include parameters for environment (dev/prod) and resource naming conventions."
+            ),
             "measure": "throughput",
         },
     ],
@@ -57,41 +142,51 @@ SUITES = {
         {
             "id": "code_simple",
             "name": "Coding — Simple function",
-            "prompt": "Write a Python function that takes a list of dictionaries with keys 'title', 'content', 'embedding' and returns the top_k most similar to a query embedding using cosine similarity. Include type hints.",
+            "prompt": (
+                "Write a Python function that takes a list of dictionaries with keys "
+                "'title', 'content', 'embedding' and returns the top_k most similar to "
+                "a query embedding using cosine similarity. Include type hints."
+            ),
             "measure": "quality",
         },
         {
             "id": "code_multifile",
             "name": "Coding — Multi-file awareness",
-            "prompt": """Given this FastAPI app structure:
-- main.py: FastAPI app with /search endpoint
-- models.py: Pydantic models for SearchRequest and SearchResult
-- vector_store.py: class VectorStore with method search(query_embedding, top_k)
-- embeddings.py: function get_embedding(text) -> list[float]
-
-Write the complete implementation of vector_store.py using in-memory numpy arrays. The search method should return SearchResult objects sorted by cosine similarity.""",
+            "prompt": (
+                "Given this FastAPI app structure:\n"
+                "- main.py: FastAPI app with /search endpoint\n"
+                "- models.py: Pydantic models for SearchRequest and SearchResult\n"
+                "- vector_store.py: class VectorStore with method search(query_embedding, top_k)\n"
+                "- embeddings.py: function get_embedding(text) -> list[float]\n\n"
+                "Write the complete implementation of vector_store.py using in-memory numpy arrays. "
+                "The search method should return SearchResult objects sorted by cosine similarity."
+            ),
             "measure": "quality",
         },
         {
             "id": "code_debug",
             "name": "Coding — Debug and fix",
-            "prompt": """Fix the bug in this Python code:
-
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-def search(query_embedding, embeddings, top_k=5):
-    scores = [cosine_similarity(query_embedding, e) for e in embeddings]
-    top_indices = np.argsort(scores)[:top_k]  # bug here
-    return [(i, scores[i]) for i in top_indices]
-
-Explain the bug, fix it, and add a docstring.""",
+            "prompt": (
+                "Fix the bug in this Python code:\n\n"
+                "def cosine_similarity(a, b):\n"
+                "    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))\n\n"
+                "def search(query_embedding, embeddings, top_k=5):\n"
+                "    scores = [cosine_similarity(query_embedding, e) for e in embeddings]\n"
+                "    top_indices = np.argsort(scores)[:top_k]  # bug here\n"
+                "    return [(i, scores[i]) for i in top_indices]\n\n"
+                "Explain the bug, fix it, and add a docstring."
+            ),
             "measure": "quality",
         },
         {
             "id": "code_infra",
             "name": "Coding — Infrastructure task",
-            "prompt": "Write a Python script that uses the Azure SDK to list all Container Apps in a subscription, check if each one has a managed identity assigned, and output a CSV with columns: resource_group, app_name, has_identity, identity_type, last_modified.",
+            "prompt": (
+                "Write a Python script that uses the Azure SDK to list all Container Apps "
+                "in a subscription, check if each one has a managed identity assigned, and "
+                "output a CSV with columns: resource_group, app_name, has_identity, "
+                "identity_type, last_modified."
+            ),
             "measure": "quality",
         },
     ],
@@ -99,13 +194,16 @@ Explain the bug, fix it, and add a docstring.""",
         {
             "id": "deploy_rag_prompt",
             "name": "Deployment — RAG solution description",
-            "prompt": """You are an AI assistant with terminal access. Deploy a minimal RAG (Retrieval Augmented Generation) solution with these components:
-1. A FastAPI backend with /upload and /query endpoints
-2. A simple in-memory vector store
-3. Ollama as the LLM backend (assume it's running on localhost:11434)
-4. A React frontend with a file upload and chat interface
-
-List exactly what files you would create and the steps to deploy this. Be specific about file paths and commands.""",
+            "prompt": (
+                "You are an AI assistant with terminal access. Deploy a minimal RAG "
+                "(Retrieval Augmented Generation) solution with these components:\n"
+                "1. A FastAPI backend with /upload and /query endpoints\n"
+                "2. A simple in-memory vector store\n"
+                "3. Ollama as the LLM backend (assume it's running on localhost:11434)\n"
+                "4. A React frontend with a file upload and chat interface\n\n"
+                "List exactly what files you would create and the steps to deploy this. "
+                "Be specific about file paths and commands."
+            ),
             "measure": "quality",
             "notes": "Manual evaluation — compare against Claude Code baseline",
         },
@@ -121,75 +219,105 @@ def load_config():
         models = yaml.safe_load(f)
     return nodes["nodes"], models
 
-def get_models_for_node(node_name, models_config):
-    node_models = models_config.get("node_models", {}).get(node_name, [])
-    return node_models
 
-def run_ollama_benchmark(host, port, model, prompt, timeout=120):
-    """Run a single benchmark against an Ollama endpoint."""
+def get_models_for_node(node_name, models_config):
+    return models_config.get("node_models", {}).get(node_name, [])
+
+
+def run_ollama_benchmark(host, port, model, prompt, timeout=120, num_predict=None):
+    """Run a single benchmark against an Ollama endpoint.
+
+    Captures both tg (generation) and pp (prefill) tokens/sec from Ollama's
+    done chunk. timeout is enforced as a wall-clock limit via a daemon thread.
+    Thinking models have CoT disabled via the API for fair comparison.
+
+    Args:
+        num_predict: if set, caps generation length (used for fixed tg128/pp512 tests)
+    """
     url = f"http://{host}:{port}/api/generate"
+    thinking = is_thinking_model(model)
+
+    options = {"temperature": 0, "seed": 42}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": True,
-        "options": {
-            "temperature": 0,   # deterministic for benchmarking
-            "seed": 42,
-        }
+        "options": options,
     }
+    if thinking:
+        payload["think"] = False
 
     result = {
         "model": model,
+        "thinking_suppressed": thinking,
         "prompt_tokens": None,
         "eval_tokens": None,
         "ttft_ms": None,
         "total_ms": None,
-        "tokens_per_sec": None,
+        "tg_tokens_per_sec": None,   # generation speed (eval phase)
+        "pp_tokens_per_sec": None,   # prefill speed (prompt processing phase)
         "response_preview": "",
         "error": None,
     }
 
-    try:
-        t_start = time.time()
-        first_token_time = None
-        full_response = []
+    def _run():
+        try:
+            t_start = time.time()
+            first_token_time = None
+            full_response = []
 
-        with requests.post(url, json=payload, stream=True, timeout=timeout) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            with requests.post(url, json=payload, stream=True, timeout=(10, timeout)) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                if first_token_time is None and chunk.get("response"):
-                    first_token_time = time.time()
-                    result["ttft_ms"] = round((first_token_time - t_start) * 1000)
+                    if first_token_time is None and chunk.get("response"):
+                        first_token_time = time.time()
+                        result["ttft_ms"] = round((first_token_time - t_start) * 1000)
 
-                if chunk.get("response"):
-                    full_response.append(chunk["response"])
+                    if chunk.get("response"):
+                        full_response.append(chunk["response"])
 
-                if chunk.get("done"):
-                    t_end = time.time()
-                    result["total_ms"] = round((t_end - t_start) * 1000)
-                    result["prompt_tokens"] = chunk.get("prompt_eval_count")
-                    result["eval_tokens"] = chunk.get("eval_count")
-                    if chunk.get("eval_duration") and chunk.get("eval_count"):
-                        result["tokens_per_sec"] = round(
-                            chunk["eval_count"] / (chunk["eval_duration"] / 1e9), 1
-                        )
-                    break
+                    if chunk.get("done"):
+                        t_end = time.time()
+                        result["total_ms"] = round((t_end - t_start) * 1000)
+                        result["prompt_tokens"] = chunk.get("prompt_eval_count")
+                        result["eval_tokens"] = chunk.get("eval_count")
 
-        result["response_preview"] = "".join(full_response)[:300]
+                        # tg: generation speed from Ollama's eval_duration
+                        if chunk.get("eval_duration") and chunk.get("eval_count"):
+                            result["tg_tokens_per_sec"] = round(
+                                chunk["eval_count"] / (chunk["eval_duration"] / 1e9), 1
+                            )
 
-    except requests.exceptions.ConnectionError:
-        result["error"] = f"Connection refused — is Ollama running on {host}:{port}?"
-    except requests.exceptions.Timeout:
+                        # pp: prefill speed from prompt_eval_duration
+                        if chunk.get("prompt_eval_duration") and chunk.get("prompt_eval_count"):
+                            result["pp_tokens_per_sec"] = round(
+                                chunk["prompt_eval_count"] / (chunk["prompt_eval_duration"] / 1e9), 1
+                            )
+                        break
+
+            result["response_preview"] = "".join(full_response)[:300]
+
+        except requests.exceptions.ConnectionError:
+            result["error"] = f"Connection refused — is Ollama running on {host}:{port}?"
+        except Exception as e:
+            result["error"] = str(e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
         result["error"] = f"Timeout after {timeout}s"
-    except Exception as e:
-        result["error"] = str(e)
 
     return result
 
@@ -224,17 +352,30 @@ def run_node_benchmark(node_name, node_config, models_to_test, suite_name, suite
     run_results = []
 
     for model in models_to_test:
-        # Check if model is actually available
         model_available = any(model in m for m in available_models)
         if not model_available:
             print(f"\n  Model: {model} — NOT AVAILABLE (run setup script)")
             continue
 
-        print(f"\n  Model: {model}")
+        timeout = get_model_timeout(model)
+        print(f"\n  Model: {model} (timeout: {timeout}s/test)")
+
+        # Warm up — ensure the model is loaded before timing starts.
+        # Large models can take 60-120s to load.
+        print(f"    [warm-up] Loading model...", end=" ", flush=True)
+        warmup = run_ollama_benchmark(host, port, model, "hi", timeout=300)
+        if warmup.get("error"):
+            print(f"FAILED ({warmup['error']}) — skipping")
+            continue
+        print("ready")
 
         for test in suite:
             print(f"    [{test['id']}] {test['name']}...", end=" ", flush=True)
-            result = run_ollama_benchmark(host, port, model, test["prompt"])
+            result = run_ollama_benchmark(
+                host, port, model, test["prompt"],
+                timeout=timeout,
+                num_predict=test.get("num_predict"),
+            )
 
             record = {
                 "timestamp": datetime.now().isoformat(),
@@ -251,9 +392,10 @@ def run_node_benchmark(node_name, node_config, models_to_test, suite_name, suite
             if result["error"]:
                 print(f"ERROR: {result['error']}")
             else:
-                tps = f"{result['tokens_per_sec']} tok/s" if result["tokens_per_sec"] else "N/A"
+                tg = f"tg {result['tg_tokens_per_sec']} tok/s" if result["tg_tokens_per_sec"] else ""
+                pp = f"pp {result['pp_tokens_per_sec']} tok/s" if result["pp_tokens_per_sec"] else ""
                 ttft = f"TTFT {result['ttft_ms']}ms" if result["ttft_ms"] else ""
-                print(f"✓  {tps}  {ttft}")
+                print(f"✓  {tg}  {pp}  {ttft}".strip())
 
     return run_results
 
