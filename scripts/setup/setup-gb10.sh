@@ -83,6 +83,7 @@ hf_pull_and_import() {
   local ollama_tag=$1
   local hf_repo=$2
   local hf_file=$3
+  local renderer=${4:-""}   # e.g. qwen3.5 — sets RENDERER and PARSER in Modelfile
   local local_dir="${HF_MODELS_DIR}/$(echo ${ollama_tag} | tr ':' '-')"
 
   echo "  ${ollama_tag} (from ${hf_repo})..."
@@ -103,8 +104,18 @@ hf_pull_and_import() {
       echo '  ${hf_file}: already on disk'
     fi
 
-    # Import into Ollama
-    echo 'FROM ${local_dir}/${hf_file}' > /tmp/Modelfile.tmp
+    # Build Modelfile — renderer/parser are required for correct chat template handling
+    {
+      echo 'FROM ${local_dir}/${hf_file}'
+      if [ -n '${renderer}' ]; then
+        echo 'RENDERER ${renderer}'
+        echo 'PARSER ${renderer}'
+        echo 'PARAMETER presence_penalty 1.5'
+        echo 'PARAMETER temperature 1'
+        echo 'PARAMETER top_k 20'
+        echo 'PARAMETER top_p 0.95'
+      fi
+    } > /tmp/Modelfile.tmp
     ollama create ${ollama_tag} -f /tmp/Modelfile.tmp
     rm /tmp/Modelfile.tmp
     echo '  ${ollama_tag}: imported successfully'
