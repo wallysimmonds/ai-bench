@@ -137,6 +137,7 @@ ollama_pull qwen2.5-coder:7b
 ollama_pull qwen2.5-coder:14b
 ollama_pull qwen3.5:9b
 ollama_pull qwen3.5:35b-a3b
+ollama_pull gemma4:26b
 ollama_pull deepseek-r1:70b
 ollama_pull llama3.3:70b
 ollama_pull qwen3-coder-next:latest
@@ -216,7 +217,7 @@ $SSH "
 # ── 8. Create GGUF symlinks for llama-bench ───────────────────────────────────
 echo "--- Setting up llama-bench GGUF symlinks ---"
 $SSH "
-  for tag in 'qwen2.5-coder:7b' 'qwen2.5-coder:14b' 'qwen3.5:9b' 'qwen3.5:35b-a3b' 'deepseek-r1:70b' 'llama3.3:70b' 'qwen3-coder-next:latest' 'gpt-oss:120b' 'qwen3.5:122b'; do
+  for tag in 'qwen2.5-coder:7b' 'qwen2.5-coder:14b' 'qwen3.5:9b' 'qwen3.5:35b-a3b' 'gemma4:26b' 'deepseek-r1:70b' 'llama3.3:70b' 'qwen3-coder-next:latest' 'gpt-oss:120b' 'qwen3.5:122b'; do
     blob=\$(ollama show \"\${tag}\" --modelfile 2>/dev/null | grep '^FROM' | awk '{print \$2}')
     slug=\$(echo \"\${tag}\" | tr ':' '-')
     if [ -n \"\${blob}\" ] && [ -f \"\${blob}\" ]; then

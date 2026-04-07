@@ -34,6 +34,13 @@ models:
       size_gb: 16
       arch: dense
 
+    - name: gemma4:26b
+      ollama_tag: gemma4:26b
+      source: ollama
+      size_gb: 18
+      arch: dense
+      notes: "256K context window, multimodal (text+image)"
+
     - name: qwen3.5:35b-a3b
       ollama_tag: qwen3.5:35b-a3b
       source: ollama
@@ -92,6 +99,7 @@ node_models:
     - qwen2.5-coder:14b
     - qwen3.5:9b
     - qwen3.5:35b-a3b
+    - gemma4:26b
 
   bosgame-m5:
     - qwen2.5-coder:7b
@@ -99,6 +107,7 @@ node_models:
     - qwen3.5:9b
     - qwen3.5:27b
     - qwen3.5:35b-a3b
+    - gemma4:26b
     - deepseek-r1:70b
     - llama3.3:70b
     - qwen3-coder-next
@@ -110,6 +119,7 @@ node_models:
     - qwen3.5:9b
     - qwen3.5:27b
     - qwen3.5:35b-a3b
+    - gemma4:26b
     - deepseek-r1:70b
     - llama3.3:70b
     - qwen3-coder-next
