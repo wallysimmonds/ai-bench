@@ -26,12 +26,13 @@ REPORTS_DIR.mkdir(exist_ok=True)
 # ── Model metadata ────────────────────────────────────────────────────────────
 
 def load_model_meta():
-    """Return dict: ollama_tag → {arch, active_params} from models.yaml."""
+    """Return dict: ollama_tag → {arch, active_params, order} from models.yaml."""
     import yaml
     meta = {}
     try:
         with open(ROOT / "config" / "models.yaml") as f:
             cfg = yaml.safe_load(f)
+        order = 0
         for tier in cfg.get("models", {}).values():
             for m in tier:
                 tag = m.get("ollama_tag") or m.get("name")
@@ -39,10 +40,17 @@ def load_model_meta():
                     meta[tag] = {
                         "arch":          m.get("arch", "dense"),
                         "active_params": m.get("active_params"),
+                        "order":         order,
                     }
+                    order += 1
     except Exception:
         pass
     return meta
+
+
+def model_order_key(tag, meta):
+    """Sort key: canonical models.yaml order, unknown models last."""
+    return meta.get(tag, {}).get("order", 9999)
 
 
 def model_label(tag, meta):
@@ -167,32 +175,68 @@ def collapsible(label, content):
 
 # ── Summary tables ────────────────────────────────────────────────────────────
 
+def _grouped_rows(models, nodes_for, tg_for, pp_for, max_tg, max_pp, extra_col_fn, meta):
+    """
+    Build tbody HTML: one row per (model, node), models in canonical order,
+    alternating background per model group.
+    """
+    rows = ""
+    for i, model in enumerate(models):
+        nodes = sorted(nodes_for(model))
+        if not nodes:
+            continue
+        bg = 'style="background:rgba(255,255,255,0.018)"' if i % 2 == 0 else ""
+        sep = 'style="border-top:1px solid #2d3748"' if i > 0 else ""
+        _, badge = model_label(model, meta)
+        for j, node in enumerate(nodes):
+            tg  = tg_for(model, node)
+            pp  = pp_for(model, node)
+            if j == 0:
+                model_cell = (f'<td class="td-model" rowspan="{len(nodes)}" '
+                              f'{sep}>{model}{badge}</td>')
+                row_open = f'<tr {bg}>'
+            else:
+                model_cell = ""
+                row_open = f'<tr {bg}>'
+            rows += (f'{row_open}'
+                     f'{model_cell}'
+                     f'<td class="td-dim" style="{"border-top:1px solid #2d3748;" if j==0 and i>0 else ""}">{node}</td>'
+                     f'<td class="td-bar" style="{"border-top:1px solid #2d3748;" if j==0 and i>0 else ""}">{bar(tg, max_tg)}</td>'
+                     f'<td class="td-bar" style="{"border-top:1px solid #2d3748;" if j==0 and i>0 else ""}">{bar(pp, max_pp, "#00b4d8")}</td>'
+                     f'{extra_col_fn(model, node, j, i)}'
+                     f'</tr>')
+    return rows
+
+
 def ollama_summary_table(tg_perf, pp_perf, ttft_all, meta):
     all_tg = [v for m in tg_perf.values() for v in m.values()]
     all_pp = [v for m in pp_perf.values() for v in m.values()]
     max_tg = max(all_tg, default=1)
     max_pp = max(all_pp, default=1)
 
-    models = sorted(set(list(tg_perf.keys()) + list(pp_perf.keys())),
-                    key=lambda m: -max(tg_perf[m].values(), default=0))
-    rows = ""
-    for model in models:
-        best_tg   = max(tg_perf[model].values(), default=None)
-        best_pp   = max(pp_perf[model].values(), default=None)
-        best_node = (max(tg_perf[model], key=tg_perf[model].get)
-                     if tg_perf[model] else "—")
-        avg_ttft  = (round(sum(ttft_all[model]) / len(ttft_all[model]))
-                     if ttft_all.get(model) else None)
-        _, badge = model_label(model, meta)
-        rows += (f'<tr>'
-                 f'<td class="td-model">{model}{badge}</td>'
-                 f'<td class="td-dim">{best_node}</td>'
-                 f'<td class="td-bar">{bar(best_tg, max_tg)}</td>'
-                 f'<td class="td-bar">{bar(best_pp, max_pp, "#00b4d8")}</td>'
-                 f'<td class="td-num">{fmt(avg_ttft, "ms")}</td>'
-                 f'</tr>')
+    models = sorted(
+        set(list(tg_perf.keys()) + list(pp_perf.keys())),
+        key=lambda m: model_order_key(m, meta)
+    )
 
-    thead = th("Model", "Best Node",
+    def nodes_for(m):
+        return set(list(tg_perf[m].keys()) + list(pp_perf[m].keys()))
+
+    def extra(model, node, j, i):
+        avg_ttft = (round(sum(ttft_all[model]) / len(ttft_all[model]))
+                    if ttft_all.get(model) else None)
+        border = "border-top:1px solid #2d3748;" if j == 0 and i > 0 else ""
+        return (f'<td class="td-num" style="{border}">'
+                f'{fmt(avg_ttft, "ms")}</td>')
+
+    rows = _grouped_rows(
+        models, nodes_for,
+        lambda m, n: tg_perf[m].get(n),
+        lambda m, n: pp_perf[m].get(n),
+        max_tg, max_pp, extra, meta
+    )
+
+    thead = th("Model", "Node",
                'TG tok/s <span class="col-sub">(generation)</span>',
                'PP tok/s <span class="col-sub">(prefill)</span>',
                "Avg TTFT")
@@ -205,24 +249,26 @@ def llama_summary_table(tg_perf, pp_perf, meta):
     max_tg = max(all_tg, default=1)
     max_pp = max(all_pp, default=1)
 
-    models = sorted(set(list(tg_perf.keys()) + list(pp_perf.keys())),
-                    key=lambda m: -max(tg_perf[m].values(), default=0))
-    rows = ""
-    for model in models:
-        best_tg   = max(tg_perf[model].values(), default=None)
-        best_pp   = max(pp_perf[model].values(), default=None)
-        best_node = (max(tg_perf[model], key=tg_perf[model].get)
-                     if tg_perf[model] else "—")
-        _, badge = model_label(model, meta)
-        rows += (f'<tr>'
-                 f'<td class="td-model">{model}{badge}</td>'
-                 f'<td class="td-dim">{best_node}</td>'
-                 f'<td class="td-bar">{bar(best_tg, max_tg)}</td>'
-                 f'<td class="td-bar">{bar(best_pp, max_pp, "#00b4d8")}</td>'
-                 f'<td class="td-num" style="color:#4a5568">pp512 / tg128</td>'
-                 f'</tr>')
+    models = sorted(
+        set(list(tg_perf.keys()) + list(pp_perf.keys())),
+        key=lambda m: model_order_key(m, meta)
+    )
 
-    thead = th("Model", "Best Node",
+    def nodes_for(m):
+        return set(list(tg_perf[m].keys()) + list(pp_perf[m].keys()))
+
+    def extra(model, node, j, i):
+        border = "border-top:1px solid #2d3748;" if j == 0 and i > 0 else ""
+        return f'<td class="td-num" style="color:#4a5568;{border}">pp512 / tg128</td>'
+
+    rows = _grouped_rows(
+        models, nodes_for,
+        lambda m, n: tg_perf[m].get(n),
+        lambda m, n: pp_perf[m].get(n),
+        max_tg, max_pp, extra, meta
+    )
+
+    thead = th("Model", "Node",
                'TG tok/s <span class="col-sub">(tg128)</span>',
                'PP tok/s <span class="col-sub">(pp512)</span>',
                "Test")
