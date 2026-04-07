@@ -41,6 +41,19 @@ models:
       arch: dense
       notes: "256K context window, multimodal (text+image)"
 
+    - name: qwen2.5-coder:32b
+      ollama_tag: qwen2.5-coder:32b
+      source: ollama
+      size_gb: 19
+      arch: dense
+
+    - name: qwen3-coder:30b
+      ollama_tag: qwen3-coder:30b
+      source: ollama
+      size_gb: 18
+      arch: moe
+      notes: "qwen3moe architecture"
+
     - name: qwen3.5:35b-a3b
       ollama_tag: qwen3.5:35b-a3b
       source: ollama
@@ -97,16 +110,20 @@ node_models:
   nvidia-ai:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
+    - qwen2.5-coder:32b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3-coder:30b
     - qwen3.5:35b-a3b
     - gemma4:26b
 
   bosgame-m5:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
+    - qwen2.5-coder:32b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3-coder:30b
     - qwen3.5:35b-a3b
     - gemma4:26b
     - deepseek-r1:70b
@@ -118,8 +135,10 @@ node_models:
   lenovo-gb10:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
+    - qwen2.5-coder:32b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3-coder:30b
     - qwen3.5:35b-a3b
     - gemma4:26b
     - deepseek-r1:70b
