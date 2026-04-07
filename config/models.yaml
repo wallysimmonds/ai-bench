@@ -1,6 +1,7 @@
 # Model assignments per node
 # size_gb is approximate file size at Q4 quant
 # source: ollama = pull directly; hf = download GGUF from HuggingFace then ollama create
+# arch: dense | moe
 
 models:
   # Models runnable on all nodes
@@ -9,10 +10,13 @@ models:
       ollama_tag: qwen2.5-coder:7b
       source: ollama
       size_gb: 5
+      arch: dense
+
     - name: qwen3.5:9b
       ollama_tag: qwen3.5:9b
       source: ollama
       size_gb: 7
+      arch: dense
 
   # Needs 20GB+ VRAM or unified memory
   mid_tier:
@@ -20,16 +24,22 @@ models:
       ollama_tag: qwen2.5-coder:14b
       source: ollama
       size_gb: 9
+      arch: dense
+
     - name: qwen3.5:27b
       ollama_tag: qwen3.5:27b
       source: hf
       hf_repo: bartowski/Qwen_Qwen3.5-27B-GGUF
       hf_file: Qwen_Qwen3.5-27B-Q4_K_M.gguf
       size_gb: 16
+      arch: dense
+
     - name: qwen3.5:35b-a3b
       ollama_tag: qwen3.5:35b-a3b
       source: ollama
       size_gb: 23
+      arch: moe
+      active_params: 3b
       notes: "MoE — only 3B active, very efficient"
 
   # Large models — unified memory nodes only (Strix/GB10)
@@ -38,29 +48,42 @@ models:
       ollama_tag: deepseek-r1:70b
       source: ollama
       size_gb: 42
+      arch: dense
       nodes: [bosgame-m5, lenovo-gb10]
+
     - name: llama3.3:70b
       ollama_tag: llama3.3:70b
       source: ollama
       size_gb: 42
+      arch: dense
       nodes: [bosgame-m5, lenovo-gb10]
+
     - name: qwen3-coder-next
       ollama_tag: qwen3-coder-next:latest
       source: ollama
       size_gb: 51
-      nodes: [bosgame-m5, lenovo-gb10]
+      arch: moe
+      active_params: 22b
       notes: "80B MoE — key agentic benchmark"
+      nodes: [bosgame-m5, lenovo-gb10]
+
     - name: gpt-oss:120b
       ollama_tag: gpt-oss:120b
       source: ollama
       size_gb: 65
+      arch: moe
+      active_params: 4b
+      notes: "128 experts, 4 active per token"
       nodes: [bosgame-m5, lenovo-gb10]
+
     - name: qwen3.5:122b
       ollama_tag: qwen3.5:122b
       source: ollama
       size_gb: 81
-      nodes: [bosgame-m5, lenovo-gb10]
+      arch: moe
+      active_params: 10b
       notes: "MoE — 10B active params"
+      nodes: [bosgame-m5, lenovo-gb10]
 
 # Per-node model assignments
 node_models:
