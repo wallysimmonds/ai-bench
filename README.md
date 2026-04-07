@@ -113,7 +113,8 @@ ai-bench/
 
 ## Known Limitations
 
-- **gpt-oss:120b and qwen3.5:122b skip llama-bench**: Ollama-packaged GGUFs for these models use different tensor/field names than llama.cpp expects. HuggingFace-sourced GGUFs (e.g. bartowski) are compatible. This is a llama.cpp upstream issue.
+- **Ollama qwen3.5 GGUFs skip llama-bench**: All Ollama-packaged qwen3.5 GGUFs (9b, 35b-a3b, 122b) fail with `rope.dimension_sections has wrong array length; expected 4, got 3`. HuggingFace-sourced GGUFs (e.g. bartowski qwen3.5:27b) are compatible. Ollama benchmark numbers are unaffected.
+- **gpt-oss:120b skips llama-bench**: Ollama GGUF uses different tensor names than llama.cpp's OPENAI_MOE implementation. HF-sourced GGUFs would work.
 - **ROCm shader cache warmup**: First llama-bench run on Strix Halo compiles shaders — subsequent runs are faster. Results from first run may be unrepresentative.
 - **Sequential model loading**: Nodes with 128GB unified memory can only run one model at a time. `run_all.sh` enforces this by unloading Ollama between models.
 - **MoE TG vs PP**: MoE models (e.g. gpt-oss:120b, qwen3.5:122b) show higher TG tok/s than equivalent-size dense models because only a fraction of parameters activate per token. The report annotates all models as dense or MoE.
