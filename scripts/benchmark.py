@@ -45,6 +45,7 @@ MODEL_TIMEOUTS = {
     "35b":   240,
     "32b":   240,
     "27b":   360,
+    "26b":   240,
     "14b":   180,
 }
 
@@ -60,7 +61,9 @@ def get_model_timeout(model_name, default=120):
 THINKING_MODELS = {
     "qwen3.5",
     "qwen3-coder-next",
+    "qwen3-coder",
     "deepseek-r1",
+    "gemma4",
 }
 
 def is_thinking_model(model_name):
