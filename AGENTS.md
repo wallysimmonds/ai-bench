@@ -20,7 +20,7 @@ You are operating on the **bosgame-m5** node (AMD Strix Halo, 192.168.1.54). The
 | `bosgame-m5` | 192.168.1.54 | johanus | AMD AI Max 395 (Strix Halo), 128GB, ROCm |
 | `lenovo-gb10` | 192.168.1.52 | wally | Grace Blackwell GB10, 128GB, CUDA |
 | `nvidia-ai` | 192.168.1.211 | johanus | RTX 5070 Ti + RTX PRO 4K, 40GB VRAM |
-| `8700g-5060ti` | 192.168.1.194 | wally | AMD Ryzen 7 8700G + RTX 5060 Ti 16GB |
+| `8700g-5060ti` | 192.168.1.194 | johanus | AMD Ryzen 7 8700G + RTX 5060 Ti 16GB |
 
 SSH key for all nodes: `~/.ssh/id_ed25519`
 
