@@ -26,12 +26,14 @@ RESULTS_DIR="${ROOT}/results"
 NODE_NAME="${1:-}"
 INSTALL=false
 MODELS_OVERRIDE=""
+CONTEXT_SIZES="512"  # default: community-standard pp512
 
 shift || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install) INSTALL=true ;;
     --models) MODELS_OVERRIDE="$2"; shift ;;
+    --contexts) CONTEXT_SIZES="$2"; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
   shift
@@ -73,8 +75,8 @@ if [[ "$INSTALL" == "true" ]]; then
   echo "--- Installing llama.cpp ---"
   $SSH "
     if [ -f ${LLAMA_DIR}/build/bin/llama-bench ]; then
-      echo 'llama-bench already installed'
-      exit 0
+      echo 'llama-bench already installed — clearing build dir for fresh compile'
+      rm -rf ${LLAMA_DIR}/build
     fi
 
     # Dependencies
@@ -86,10 +88,14 @@ if [[ "$INSTALL" == "true" ]]; then
 
     cd ${LLAMA_DIR}
 
-    # Build with CUDA if available, otherwise CPU
+    # Build with CUDA, ROCm/HIP, or CPU fallback
     if command -v nvcc &>/dev/null || [ -d /usr/local/cuda ]; then
       echo 'Building with CUDA support...'
       cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+    elif command -v hipcc &>/dev/null || [ -d /opt/rocm ]; then
+      echo 'Building with ROCm/HIP support...'
+      sudo apt-get install -y libxml2 2>/dev/null
+      cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151 -DCMAKE_BUILD_TYPE=Release
     else
       echo 'Building CPU-only...'
       cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -239,7 +245,7 @@ for m in models:
     result = subprocess.run(
         ['${LLAMA_DIR}/build/bin/llama-bench',
          '--model', gguf_path,
-         '-p', '512', '-n', '128', '-r', '3',
+         '-p', '${CONTEXT_SIZES}', '-n', '128', '-r', '3',
          '--output', 'json'],
         capture_output=True, text=True
     )

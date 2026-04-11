@@ -105,19 +105,43 @@ def aggregate_ollama(records):
 
 
 def aggregate_llama(records):
-    pp_perf = defaultdict(dict)
-    tg_perf = defaultdict(dict)
+    """Aggregate to best pp512-equivalent and tg128 per model/node.
+    For PP, prefer the smallest prompt size (closest to community pp512)."""
+    pp_perf     = defaultdict(dict)
+    pp_min_size = defaultdict(lambda: defaultdict(lambda: 99999))
+    tg_perf     = defaultdict(dict)
     for r in records:
-        model = r.get("model_tag", r.get("model", "unknown"))
-        node  = r.get("node", "unknown")
-        ts    = r.get("avg_ts")
+        model    = r.get("model_tag", r.get("model", "unknown"))
+        node     = r.get("node", "unknown")
+        ts       = r.get("avg_ts")
+        n_prompt = r.get("n_prompt", 0)
         if ts is None:
             continue
         if r.get("n_gen", 1) == 0:
-            pp_perf[model][node] = round(ts, 1)
+            # Keep the result with the smallest prompt size as the summary number
+            if n_prompt < pp_min_size[model][node]:
+                pp_perf[model][node]     = round(ts, 1)
+                pp_min_size[model][node] = n_prompt
         else:
             tg_perf[model][node] = round(ts, 1)
     return tg_perf, pp_perf
+
+
+def aggregate_context_scaling(records):
+    """Group PP results by (model, node, n_prompt) for context scaling analysis."""
+    # ctx_perf[model][node][n_prompt] = avg_ts
+    ctx_perf = defaultdict(lambda: defaultdict(dict))
+    for r in records:
+        if r.get("n_gen", 1) != 0:
+            continue  # PP only
+        model    = r.get("model_tag", r.get("model", "unknown"))
+        node     = r.get("node", "unknown")
+        ts       = r.get("avg_ts")
+        n_prompt = r.get("n_prompt", 0)
+        if ts is None or n_prompt == 0:
+            continue
+        ctx_perf[model][node][n_prompt] = round(ts, 1)
+    return ctx_perf
 
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
@@ -275,6 +299,73 @@ def llama_summary_table(tg_perf, pp_perf, meta):
     return card(table(thead, rows or empty(5))), max_tg
 
 
+# ── Context scaling table ─────────────────────────────────────────────────────
+
+def context_scaling_table(ctx_perf, meta):
+    """Table showing PP tok/s at each context size, per model per node."""
+    if not ctx_perf:
+        return ""
+
+    # Find all context sizes present across all records
+    all_sizes = sorted(set(
+        sz for model in ctx_perf.values()
+        for node in model.values()
+        for sz in node.keys()
+    ))
+    if not all_sizes:
+        return ""
+
+    def fmt_size(n):
+        return f"{n//1024}k" if n >= 1024 else str(n)
+
+    models = sorted(ctx_perf.keys(), key=lambda m: model_order_key(m, meta))
+
+    # Max value across all cells for bar scaling
+    all_vals = [ts for m in ctx_perf.values() for n in m.values() for ts in n.values()]
+    max_val  = max(all_vals, default=1)
+
+    rows = ""
+    for i, model in enumerate(models):
+        nodes = sorted(ctx_perf[model].keys())
+        _, badge = model_label(model, meta)
+        sep = 'style="border-top:1px solid #2d3748"' if i > 0 else ""
+        for j, node in enumerate(nodes):
+            node_data = ctx_perf[model][node]
+            cells = ""
+            for sz in all_sizes:
+                val = node_data.get(sz)
+                border = "border-top:1px solid #2d3748;" if j == 0 and i > 0 else ""
+                if val:
+                    pct = min(100, int(val / max_val * 100))
+                    c = "#06d6a0" if pct > 66 else "#ffd166" if pct > 33 else "#ef476f"
+                    cell = (f'<div style="display:flex;align-items:center;gap:6px">'
+                            f'<div style="flex:1;background:#1a1a2e;border-radius:3px;height:10px;overflow:hidden">'
+                            f'<div style="width:{pct}%;height:100%;background:{c};border-radius:3px"></div></div>'
+                            f'<span style="font-weight:600;min-width:52px;color:{c};font-size:12px">{val}</span></div>')
+                else:
+                    cell = '<span style="color:#4a5568">—</span>'
+                cells += f'<td class="td-bar" style="min-width:140px;{border}">{cell}</td>'
+
+            if j == 0:
+                model_cell = f'<td class="td-model" rowspan="{len(nodes)}" {sep}>{model}{badge}</td>'
+                row_open   = f'<tr style="{"background:rgba(255,255,255,0.018)" if i % 2 == 0 else ""}">'
+            else:
+                model_cell = ""
+                row_open   = f'<tr style="{"background:rgba(255,255,255,0.018)" if i % 2 == 0 else ""}">'
+
+            border_node = "border-top:1px solid #2d3748;" if j == 0 and i > 0 else ""
+            rows += (f'{row_open}{model_cell}'
+                     f'<td class="td-dim" style="{border_node}">{node}</td>'
+                     f'{cells}</tr>')
+
+    size_heads = "".join(
+        f'<th style="padding:12px 14px">PP @ {fmt_size(sz)} <span class="col-sub">tok/s</span></th>'
+        for sz in all_sizes
+    )
+    thead = f'<tr><th style="padding:12px 14px">Model</th><th style="padding:12px 14px">Node</th>{size_heads}</tr>'
+    return card(table(thead, rows or empty(2 + len(all_sizes))))
+
+
 # ── Detail tables (for collapsible drill-down) ────────────────────────────────
 
 def ollama_matrix(tg_perf):
@@ -372,11 +463,15 @@ def build_report(ollama_records, llama_records):
     meta = load_model_meta()
     o_tg, o_pp, o_ttft = aggregate_ollama(ollama_records)
     l_tg, l_pp          = aggregate_llama(llama_records)
+    ctx_perf            = aggregate_context_scaling(llama_records)
 
     # Summary tables
     o_sum_html, o_peak_tg = ollama_summary_table(o_tg, o_pp, o_ttft, meta)
     l_sum_html, l_peak_tg = llama_summary_table(l_tg, l_pp, meta)
     peak_tg = max(o_peak_tg, l_peak_tg)
+
+    # Context scaling table
+    ctx_html = context_scaling_table(ctx_perf, meta)
 
     # Detail tables
     o_matrix_html = ollama_matrix(o_tg)
@@ -390,6 +485,8 @@ def build_report(ollama_records, llama_records):
         nav_links += '<a class="nav-link" href="#ollama">Ollama</a>'
     if llama_records:
         nav_links += '<a class="nav-link" href="#llamabench">llama-bench</a>'
+    if ctx_html:
+        nav_links += '<a class="nav-link" href="#context">Context Scaling</a>'
 
     # Page
     html = f"""<!DOCTYPE html>
@@ -526,6 +623,10 @@ def build_report(ollama_records, llama_records):
    collapsible("Node × Model Matrix — TG tok/s", l_matrix_html) +
    collapsible("Raw Results — all runs", l_raw_html) +
    '</div>' if llama_records else ''}
+
+  {'<a name="context"></a><div class="section"><div class="section-title">Context Scaling <span class="section-sub">PP tok/s vs prompt size — how prefill throughput degrades with context</span></div>' +
+   ctx_html +
+   '</div>' if ctx_html else ''}
 
 </div>
 </body>

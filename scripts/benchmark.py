@@ -103,6 +103,13 @@ SUITES = {
             "measure": "tg",
         },
         {
+            "id": "tg_500",
+            "name": "Generation — 500 tokens",
+            "prompt": "Write a Python function to perform binary search on a sorted list.",
+            "num_predict": 500,
+            "measure": "tg",
+        },
+        {
             "id": "ttft_short",
             "name": "TTFT — Short prompt",
             "prompt": "What is 2 + 2?",
