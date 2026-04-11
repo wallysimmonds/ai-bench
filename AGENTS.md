@@ -7,9 +7,38 @@ You are operating on the **bosgame-m5** node (AMD Strix Halo, 192.168.1.54). The
 ## STOP CONDITIONS — Do not attempt workarounds, ask the user instead
 
 - **SSH auth failure / Permission denied** — All nodes require key-based auth. `~/.ssh/id_ed25519` must be in `authorized_keys` on the target node. Never attempt sshpass, expect, or password workarounds. Ask the user to run `ssh-copy-id` from their local machine.
-- **Missing sudo / Permission denied on apt** — Do not attempt to install system packages. Ask the user.
 - **Node unreachable** — Check cables/power, ask the user. Do not loop on retries.
 - **Model not loaded in Ollama** — Run `ollama pull <tag>` and wait. If it fails, ask the user.
+
+## Node Prerequisites
+
+Before benchmarking a node for the first time, verify these are in place. If not, fix them — you have the access to do so:
+
+**SSH key auth** — from this machine (bosgame-m5):
+```bash
+# Generate key if needed
+test -f ~/.ssh/id_ed25519 || ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+# Install key on target node (requires password once)
+ssh-copy-id -i ~/.ssh/id_ed25519 <user>@<host>
+```
+
+**Passwordless sudo** — required on all nodes for package installation and setup:
+```bash
+ssh <user>@<host> "sudo grep -q 'NOPASSWD' /etc/sudoers || echo '<user> ALL=(ALL) NOPASSWD: ALL' | sudo tee -a /etc/sudoers"
+```
+If that fails due to missing sudo, ask the user to run `sudo visudo` and add `<user> ALL=(ALL) NOPASSWD: ALL`.
+
+**Ollama installed and running:**
+```bash
+ssh <user>@<host> "curl -s http://localhost:11434/api/tags > /dev/null && echo 'ollama ok' || echo 'ollama not running'"
+```
+If not running: `ssh <user>@<host> "curl -fsSL https://ollama.com/install.sh | sh"`
+
+**Run preflight check before any benchmark:**
+```bash
+ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=5 <user>@<host> "echo ok" || { echo "SSH failed — set up key auth first"; exit 1; }
+curl -s --max-time 5 http://<host>:11434/api/tags > /dev/null || { echo "Ollama not reachable"; exit 1; }
+```
 
 ---
 
