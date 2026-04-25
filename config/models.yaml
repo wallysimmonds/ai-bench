@@ -70,6 +70,14 @@ models:
       active_params: 3b
       notes: "MoE — only 3B active, very efficient"
 
+    - name: qwen3.6:35b-a3b
+      ollama_tag: qwen3.6:35b-a3b
+      source: ollama
+      size_gb: 23
+      arch: moe
+      active_params: 3b
+      notes: "MoE — only 3B active, very efficient"
+
   # Large models — unified memory nodes only (Strix/GB10)
   large:
     - name: deepseek-r1:70b
@@ -127,6 +135,8 @@ node_models:
     - qwen3.5:27b
     - qwen3-coder:30b
     - qwen3.5:35b-a3b
+    - qwen3.6:35b-a3b
+    - qwen3.6:27b
     - gemma4:26b
 
   bosgame-m5:
@@ -137,6 +147,7 @@ node_models:
     - qwen3.5:27b
     - qwen3-coder:30b
     - qwen3.5:35b-a3b
+    - qwen3.6:35b-a3b
     - gemma4:26b
     - deepseek-r1:70b
     - llama3.3:70b
