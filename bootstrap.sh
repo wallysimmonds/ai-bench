@@ -271,6 +271,7 @@ else
   # 16GB VRAM nodes (amd-ai, 8700g-5060ti)
   VRAM16_MODELS=(
     "qwen3.5:27b"           # 16GB — fills VRAM, good benchmark ceiling for 16GB nodes
+    "qwen3.6:27b"           # 16GB — next-gen dense, direct comparison with qwen3.5:27b
   )
 
   # Mid-tier — nvidia node (~40GB VRAM)

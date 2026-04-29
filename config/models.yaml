@@ -70,6 +70,12 @@ models:
       active_params: 3b
       notes: "MoE — only 3B active, very efficient"
 
+    - name: qwen3.6:27b
+      ollama_tag: qwen3.6:27b
+      source: ollama
+      size_gb: 16
+      arch: dense
+
     - name: qwen3.6:35b-a3b
       ollama_tag: qwen3.6:35b-a3b
       source: ollama
@@ -145,6 +151,7 @@ node_models:
     - qwen2.5-coder:32b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3.6:27b
     - qwen3-coder:30b
     - qwen3.5:35b-a3b
     - qwen3.6:35b-a3b
@@ -160,12 +167,14 @@ node_models:
     - qwen2.5-coder:14b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3.6:27b
 
   amd-ai:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3.6:27b
 
   lenovo-gb10:
     - qwen2.5-coder:7b
@@ -173,8 +182,10 @@ node_models:
     - qwen2.5-coder:32b
     - qwen3.5:9b
     - qwen3.5:27b
+    - qwen3.6:27b
     - qwen3-coder:30b
     - qwen3.5:35b-a3b
+    - qwen3.6:35b-a3b
     - gemma4:26b
     - deepseek-r1:70b
     - llama3.3:70b
