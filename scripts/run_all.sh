@@ -11,6 +11,21 @@
 #   ./scripts/run_all.sh lenovo-gb10 --models "qwen3.5:27b,llama3.3:70b"
 #   ./scripts/run_all.sh lenovo-gb10 --skip-llama-bench
 #
+# GPU override flags (NVIDIA nodes only):
+#   --cuda-devices 0              restrict Ollama to GPU 0 only
+#   --cuda-devices 0,1            use both GPUs (default for multi-GPU nodes)
+#   --force-spread                force tensor parallelism across all visible GPUs
+#                                 (OLLAMA_SCHED_SPREAD=true)
+#
+# Examples:
+#   # Single GPU baseline — models must fit in that GPU's VRAM
+#   ./scripts/run_all.sh nvidia-ai --cuda-devices 0 --skip-llama-bench \
+#     --models "qwen2.5-coder:7b,qwen2.5-coder:14b,qwen3.5:9b"
+#
+#   # Same models forced across both GPUs — measures tensor parallel overhead
+#   ./scripts/run_all.sh nvidia-ai --cuda-devices 0,1 --force-spread \
+#     --skip-llama-bench --models "qwen2.5-coder:7b,qwen2.5-coder:14b,qwen3.5:9b"
+#
 # Output: results/ (JSON) — then run report_html.py to generate HTML report
 set -euo pipefail
 
@@ -23,13 +38,17 @@ NODE_NAME="${1:-}"
 SUITE="standard"
 MODELS_OVERRIDE=""
 SKIP_LLAMA_BENCH=false
+CUDA_DEVICES=""
+FORCE_SPREAD=false
 
 shift || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --suite)          SUITE="$2"; shift ;;
-    --models)         MODELS_OVERRIDE="$2"; shift ;;
-    --skip-llama-bench) SKIP_LLAMA_BENCH=true ;;
+    --suite)             SUITE="$2"; shift ;;
+    --models)            MODELS_OVERRIDE="$2"; shift ;;
+    --skip-llama-bench)  SKIP_LLAMA_BENCH=true ;;
+    --cuda-devices)      CUDA_DEVICES="$2"; shift ;;
+    --force-spread)      FORCE_SPREAD=true ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
   shift
@@ -37,6 +56,7 @@ done
 
 if [[ -z "$NODE_NAME" ]]; then
   echo "Usage: $0 <node-name> [--suite standard|coding] [--models m1,m2] [--skip-llama-bench]"
+  echo "       [--cuda-devices <ids>] [--force-spread]"
   python3 -c "
 import yaml
 with open('${CONFIG_DIR}/nodes.yaml') as f:
@@ -59,6 +79,54 @@ print(node['host'], node.get('user','ubuntu'), node.get('ssh_key','~/.ssh/id_ed2
 ")"
 
 SSH="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${REMOTE_USER}@${HOST}"
+OVERRIDE_FILE="/etc/systemd/system/ollama.service.d/override.conf"
+
+# ── GPU override — temporarily patch Ollama systemd config ───────────────────
+OLLAMA_OVERRIDE_PATCHED=false
+
+patch_ollama_gpu() {
+  local extra_env=""
+  [[ -n "$CUDA_DEVICES" ]]   && extra_env+=$'\n'"Environment=\"CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}\""
+  [[ "$FORCE_SPREAD" == "true" ]] && extra_env+=$'\n'"Environment=\"OLLAMA_SCHED_SPREAD=true\""
+  [[ -z "$extra_env" ]] && return 0
+
+  echo "  Patching Ollama GPU config on ${NODE_NAME}..."
+  [[ -n "$CUDA_DEVICES" ]]        && echo "    CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}"
+  [[ "$FORCE_SPREAD" == "true" ]] && echo "    OLLAMA_SCHED_SPREAD=true"
+
+  # Save original override so we can restore it
+  ORIGINAL_OVERRIDE=$($SSH "cat ${OVERRIDE_FILE} 2>/dev/null || echo ''")
+
+  $SSH "
+    echo '${ORIGINAL_OVERRIDE}${extra_env}' | sudo tee ${OVERRIDE_FILE} > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl restart ollama
+  "
+  # Wait for Ollama to come back up
+  local tries=0
+  until curl -s "http://${HOST}:${OLLAMA_PORT}/api/tags" > /dev/null 2>&1; do
+    sleep 2; tries=$((tries+1))
+    [[ $tries -ge 30 ]] && { echo "  ERROR: Ollama did not restart"; return 1; }
+  done
+  echo "  ✓ Ollama restarted with GPU override"
+  OLLAMA_OVERRIDE_PATCHED=true
+}
+
+restore_ollama_gpu() {
+  [[ "$OLLAMA_OVERRIDE_PATCHED" != "true" ]] && return 0
+  echo "  Restoring Ollama GPU config on ${NODE_NAME}..."
+  $SSH "
+    echo '${ORIGINAL_OVERRIDE}' | sudo tee ${OVERRIDE_FILE} > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl restart ollama
+  "
+  echo "  ✓ Ollama config restored"
+}
+
+# Ensure we always restore the original config, even on failure
+trap restore_ollama_gpu EXIT
+
+patch_ollama_gpu
 
 # ── Resolve model list ────────────────────────────────────────────────────────
 if [[ -n "$MODELS_OVERRIDE" ]]; then
@@ -73,11 +141,14 @@ for m in cfg.get('node_models', {}).get('${NODE_NAME}', []):
 ")
 fi
 
+# ── Header ────────────────────────────────────────────────────────────────────
 echo "========================================"
 echo "  AI Fleet — Full Benchmark Run"
 echo "  Node:   ${NODE_NAME} (${REMOTE_USER}@${HOST})"
 echo "  Suite:  ${SUITE}"
 echo "  Models: ${#MODELS[@]}"
+[[ -n "$CUDA_DEVICES" ]]        && echo "  GPUs:   CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}"
+[[ "$FORCE_SPREAD" == "true" ]] && echo "  Mode:   forced tensor parallel (SCHED_SPREAD)"
 echo "========================================"
 echo ""
 
