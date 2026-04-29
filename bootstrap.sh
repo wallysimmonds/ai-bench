@@ -153,6 +153,10 @@ section "Python Dependencies"
 if python3 -c "import openpyxl, yaml, requests" &>/dev/null; then
   skip "Python packages already installed"
 else
+  if ! python3 -m pip --version &>/dev/null; then
+    log "Installing python3-pip..."
+    run sudo apt-get install -y python3-pip -q
+  fi
   log "Installing: openpyxl pyyaml requests"
   run python3 -m pip install openpyxl pyyaml requests --break-system-packages -q
   ok "Python packages installed"
