@@ -180,6 +180,16 @@ else
 fi
 ok "Ollama up to date"
 
+wait_for_ollama() {
+  local tries=0
+  while [ $tries -lt 30 ]; do
+    curl -s http://localhost:11434/api/tags > /dev/null 2>&1 && return 0
+    sleep 2
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
 # Systemd override — idempotent, only writes if changed
 OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
@@ -218,15 +228,15 @@ else
   fi
   run sudo systemctl daemon-reload
   run sudo systemctl restart ollama
-  sleep 3
+  wait_for_ollama || warn "Ollama did not respond after 60s — model pulls may fail"
   ok "Ollama service configured"
 fi
 
 if ! systemctl is-active --quiet ollama 2>/dev/null; then
   log "Starting Ollama service..."
   run sudo systemctl enable --now ollama
-  sleep 3
 fi
+wait_for_ollama || warn "Ollama did not respond after 60s — model pulls may fail"
 ok "Ollama service running"
 
 # ── Node config ───────────────────────────────────────────────────────────────
