@@ -50,6 +50,7 @@ curl -s --max-time 5 http://<host>:11434/api/tags > /dev/null || { echo "Ollama 
 | `lenovo-gb10` | 192.168.1.52 | wally | Grace Blackwell GB10, 128GB, CUDA |
 | `nvidia-ai` | 192.168.1.211 | johanus | RTX 5070 Ti + RTX PRO 4K, 40GB VRAM |
 | `8700g-5060ti` | 192.168.1.194 | johanus | AMD Ryzen 7 8700G + RTX 5060 Ti 16GB |
+| `amd-ai` | 192.168.1.80 | johanus | AMD Ryzen 7 8700G + RX 9070 (gfx1200) 16GB, 48GB RAM, ROCm/RDNA4 |
 
 SSH key for all nodes: `~/.ssh/id_ed25519`
 

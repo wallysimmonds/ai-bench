@@ -79,10 +79,14 @@ if command -v nvidia-smi &>/dev/null; then
   fi
 fi
 
-if [ "$HAS_NVIDIA" = false ] && command -v rocminfo &>/dev/null; then
-  if rocminfo 2>/dev/null | grep -q "Device Type.*GPU"; then
+if [ "$HAS_NVIDIA" = false ]; then
+  if command -v rocminfo &>/dev/null && rocminfo 2>/dev/null | grep -q "Device Type.*GPU"; then
     HAS_AMD=true
-    log "AMD GPU detected (ROCm)"
+    log "AMD GPU detected (rocminfo)"
+  elif [ -e /dev/kfd ]; then
+    # /dev/kfd present when amdgpu+amdkfd kernel modules are loaded — ROCm not yet installed
+    HAS_AMD=true
+    log "AMD GPU detected (/dev/kfd — ROCm not yet installed, Ollama installer will handle it)"
   fi
 fi
 
@@ -104,6 +108,9 @@ if [ "$TOTAL_MEM_GB" -ge 100 ]; then
 elif [ "$HAS_NVIDIA" = true ]; then
   NODE_TYPE="nvidia"
   NODE_NAME="nvidia-ai"
+elif [ "$HAS_AMD" = true ]; then
+  NODE_TYPE="amd_discrete"
+  NODE_NAME="amd-ai"
 else
   warn "Could not identify node type — defaulting to CPU-only config"
 fi
@@ -147,7 +154,7 @@ if python3 -c "import openpyxl, yaml, requests" &>/dev/null; then
   skip "Python packages already installed"
 else
   log "Installing: openpyxl pyyaml requests"
-  run pip install openpyxl pyyaml requests --break-system-packages -q
+  run python3 -m pip install openpyxl pyyaml requests --break-system-packages -q
   ok "Python packages installed"
 fi
 
@@ -178,7 +185,12 @@ run sudo chown "$USER":"$USER" "$MODELS_PATH"
 
 case "$NODE_TYPE" in
   strix|amd_unified)
+    # Strix Halo iGPU (gfx1151) not fully supported by ROCm without override
     EXTRA='Environment="HSA_OVERRIDE_GFX_VERSION=11.0.0"'
+    ;;
+  amd_discrete)
+    # RDNA 4 (gfx1200 = RX 9070, gfx1201 = RX 9070 XT) natively supported in ROCm 6.3+
+    EXTRA=""
     ;;
   *)
     EXTRA=""
@@ -241,6 +253,11 @@ else
     "qwen3.5:9b"            # 6GB  — latest gen small
   )
 
+  # 16GB VRAM nodes (amd-ai, 8700g-5060ti)
+  VRAM16_MODELS=(
+    "qwen3.5:27b"           # 16GB — fills VRAM, good benchmark ceiling for 16GB nodes
+  )
+
   # Mid-tier — nvidia node (~40GB VRAM)
   MID_MODELS=(
     "qwen2.5-coder:32b"     # 20GB — strong coder
@@ -283,6 +300,10 @@ else
   fi
 
   case "$NODE_TYPE" in
+    amd_discrete)
+      log "Pulling 16GB VRAM models (RDNA4)..."
+      for m in "${VRAM16_MODELS[@]}"; do pull_if_missing "$m"; done
+      ;;
     nvidia)
       log "Pulling mid-tier models (NVIDIA ~40GB VRAM)..."
       for m in "${MID_MODELS[@]}"; do pull_if_missing "$m"; done

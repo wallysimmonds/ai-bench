@@ -161,6 +161,12 @@ node_models:
     - qwen3.5:9b
     - qwen3.5:27b
 
+  amd-ai:
+    - qwen2.5-coder:7b
+    - qwen2.5-coder:14b
+    - qwen3.5:9b
+    - qwen3.5:27b
+
   lenovo-gb10:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
