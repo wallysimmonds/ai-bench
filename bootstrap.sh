@@ -212,6 +212,7 @@ case "$NODE_TYPE" in
 esac
 
 DESIRED_OVERRIDE="[Service]
+User=$USER
 Environment=\"OLLAMA_MODELS=$MODELS_PATH\"
 Environment=\"OLLAMA_HOST=0.0.0.0:11434\"
 $EXTRA"
