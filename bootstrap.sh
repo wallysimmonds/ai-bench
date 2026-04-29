@@ -290,8 +290,7 @@ else
 
   pull_if_missing() {
     local model="$1"
-    local model_base="${model%%:*}"
-    if ollama list 2>/dev/null | grep -q "$model_base"; then
+    if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qxF "$model"; then
       skip "Already pulled: $model"
     else
       log "Pulling: $model"
