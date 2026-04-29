@@ -68,12 +68,27 @@ SSH="ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${REMOTE_USER}@${HOST}"
 MODELS_DIR="/home/${REMOTE_USER}/models"
 LLAMA_DIR="/home/${REMOTE_USER}/llama.cpp"
 
+# Detect if the target node is the local machine — skip SSH if so
+IS_LOCAL=false
+for _ip in $(hostname -I 2>/dev/null); do
+  [[ "$_ip" == "$HOST" ]] && IS_LOCAL=true && break
+done
+rcmd() { if [[ "$IS_LOCAL" == "true" ]]; then bash -c "$1"; else $SSH "$1"; fi; }
+
+# ROCm GPU target derived from node type (used in llama.cpp HIP build)
+case "$NODE_TYPE" in
+  strix|amd_unified) ROCM_GPU_TARGET="gfx1151" ;;
+  amd_discrete)      ROCM_GPU_TARGET="gfx1200" ;;
+  *)                 ROCM_GPU_TARGET="" ;;
+esac
+
 echo "=== llama-bench: ${NODE_NAME} (${REMOTE_USER}@${HOST}) ==="
+[[ "$IS_LOCAL" == "true" ]] && echo "    (running locally — no SSH)"
 
 # ── Install llama.cpp if needed ───────────────────────────────────────────────
 if [[ "$INSTALL" == "true" ]]; then
   echo "--- Installing llama.cpp ---"
-  $SSH "
+  rcmd "
     if [ -f ${LLAMA_DIR}/build/bin/llama-bench ]; then
       echo 'llama-bench already installed — clearing build dir for fresh compile'
       rm -rf ${LLAMA_DIR}/build
@@ -95,7 +110,7 @@ if [[ "$INSTALL" == "true" ]]; then
     elif command -v hipcc &>/dev/null || [ -d /opt/rocm ]; then
       echo 'Building with ROCm/HIP support...'
       sudo apt-get install -y libxml2 2>/dev/null
-      cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151 -DCMAKE_BUILD_TYPE=Release
+      cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=${ROCM_GPU_TARGET} -DCMAKE_BUILD_TYPE=Release
     else
       echo 'Building CPU-only...'
       cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -107,7 +122,7 @@ if [[ "$INSTALL" == "true" ]]; then
 fi
 
 # ── Verify llama-bench is available ──────────────────────────────────────────
-$SSH "
+rcmd "
   if [ ! -f ${LLAMA_DIR}/build/bin/llama-bench ]; then
     echo 'ERROR: llama-bench not found at ${LLAMA_DIR}/build/bin/llama-bench'
     echo 'Run with --install flag first'
@@ -168,7 +183,7 @@ echo "$MODELS_JSON" | python3 -c "import sys,json; [print(f'  {m[\"tag\"]}') for
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 REMOTE_RESULTS="/tmp/llama_bench_${NODE_NAME}_${TIMESTAMP}.json"
 
-$SSH "
+rcmd "
   LLAMA_BENCH=${LLAMA_DIR}/build/bin/llama-bench
   MODELS_DIR=${MODELS_DIR}
   ALL_RESULTS='[]'
@@ -275,11 +290,16 @@ print(f'Results saved: ${REMOTE_RESULTS}')
 
 # ── Pull results back ─────────────────────────────────────────────────────────
 LOCAL_RESULTS="${RESULTS_DIR}/llama_bench_${NODE_NAME}_${TIMESTAMP}.json"
-scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no \
-  "${REMOTE_USER}@${HOST}:${REMOTE_RESULTS}" \
-  "${LOCAL_RESULTS}" 2>/dev/null && \
-  echo "Results pulled: ${LOCAL_RESULTS}" || \
-  echo "WARNING: Could not pull results from ${HOST}:${REMOTE_RESULTS}"
+if [[ "$IS_LOCAL" == "true" ]]; then
+  cp "${REMOTE_RESULTS}" "${LOCAL_RESULTS}" && \
+    echo "Results saved: ${LOCAL_RESULTS}"
+else
+  scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no \
+    "${REMOTE_USER}@${HOST}:${REMOTE_RESULTS}" \
+    "${LOCAL_RESULTS}" 2>/dev/null && \
+    echo "Results pulled: ${LOCAL_RESULTS}" || \
+    echo "WARNING: Could not pull results from ${HOST}:${REMOTE_RESULTS}"
+fi
 
 echo ""
 echo "=== llama-bench complete: ${NODE_NAME} ==="
