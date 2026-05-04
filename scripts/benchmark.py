@@ -69,6 +69,54 @@ THINKING_MODELS = {
 def is_thinking_model(model_name):
     return any(t in model_name.lower() for t in THINKING_MODELS)
 
+# ── Long-context prompt generator ─────────────────────────────────────────────
+
+def _make_long_prompt(target_ctx, margin=256):
+    """Generate a realistic infrastructure-review prompt filling ~(target_ctx - margin) tokens.
+
+    Uses varied per-section numbering so the tokeniser sees distinct content
+    rather than repeated identical token sequences.
+    """
+    section_template = (
+        "## Section {n}: Service api-gateway-{n} | Region: {region} | Tier: Production\n\n"
+        "Deployment: 3-replica set behind Azure Load Balancer. "
+        "Health probes: 30 s interval, threshold 2. "
+        "TLS termination at LB with Key Vault managed cert. "
+        "Autoscale: scale-out at 75 % CPU (5 min cooldown), scale-in at 25 % CPU (20 min cooldown). "
+        "Diagnostics forwarded to Log Analytics (90-day retention). "
+        "NSG: inbound 443/80 only; outbound to backend CIDR + KeyVault/Storage service tags. "
+        "Secrets injected via Key Vault references in App Service config. "
+        "Pipeline: GitHub Actions with environment-gated production approvals. "
+        "Known issues: health-probe timeout is set to 5 s, which is insufficient for cold-start "
+        "containers that may take up to 12 s to initialise — recommend increasing to 15 s. "
+        "The autoscale scale-in cooldown of 20 minutes may leave over-provisioned capacity during "
+        "sustained traffic drops; consider reducing to 10 minutes for cost optimisation. "
+        "TLS policy currently allows TLS 1.1 for legacy client compatibility — this should be "
+        "restricted to TLS 1.2+ to meet current compliance requirements. "
+        "No WAF policy is attached to the load balancer frontend — evaluate adding Azure Front Door "
+        "with WAF in Prevention mode for OWASP Top 10 coverage.\n\n"
+    )
+    regions = ["westeurope", "eastus", "southeastasia", "australiaeast",
+               "uksouth", "northeurope", "centralus", "japaneast"]
+    # ~4 chars per token is a reasonable heuristic for mixed prose + code
+    target_chars = (target_ctx - margin) * 4
+    preamble = (
+        "You are a senior infrastructure architect performing a detailed security and "
+        "reliability review. Analyse the following infrastructure documentation and "
+        "identify the top three gaps, ranked by business impact. For each gap provide "
+        "a concrete remediation plan with estimated effort.\n\n"
+    )
+    sections = []
+    n = 0
+    total = len(preamble)
+    while total < target_chars:
+        s = section_template.format(n=n, region=regions[n % len(regions)])
+        sections.append(s)
+        total += len(s)
+        n += 1
+    return preamble + "".join(sections)
+
+
 # ── Benchmark suites ──────────────────────────────────────────────────────────
 
 SUITES = {
@@ -218,6 +266,47 @@ SUITES = {
             "notes": "Manual evaluation — compare against Claude Code baseline",
         },
     ],
+    # Long-context suite — measures how pp and tg speed scale with context size.
+    # Each test fills ~90 % of num_ctx with realistic content then generates 64 tokens.
+    # Key metric: pp_tokens_per_sec at each size (expect sub-linear degradation).
+    "long_context": [
+        {
+            "id": "ctx_4k",
+            "name": "Long Context — 4K",
+            "prompt": _make_long_prompt(4096),
+            "num_ctx": 4096,
+            "num_predict": 64,
+            "timeout": 180,
+            "measure": "pp",
+        },
+        {
+            "id": "ctx_8k",
+            "name": "Long Context — 8K",
+            "prompt": _make_long_prompt(8192),
+            "num_ctx": 8192,
+            "num_predict": 64,
+            "timeout": 300,
+            "measure": "pp",
+        },
+        {
+            "id": "ctx_16k",
+            "name": "Long Context — 16K",
+            "prompt": _make_long_prompt(16384),
+            "num_ctx": 16384,
+            "num_predict": 64,
+            "timeout": 600,
+            "measure": "pp",
+        },
+        {
+            "id": "ctx_32k",
+            "name": "Long Context — 32K",
+            "prompt": _make_long_prompt(32768),
+            "num_ctx": 32768,
+            "num_predict": 64,
+            "timeout": 900,
+            "measure": "pp",
+        },
+    ],
 }
 
 # ── Core benchmark functions ─────────────────────────────────────────────────
@@ -234,7 +323,7 @@ def get_models_for_node(node_name, models_config):
     return models_config.get("node_models", {}).get(node_name, [])
 
 
-def run_ollama_benchmark(host, port, model, prompt, timeout=120, num_predict=None):
+def run_ollama_benchmark(host, port, model, prompt, timeout=120, num_predict=None, num_ctx=None):
     """Run a single benchmark against an Ollama endpoint.
 
     Captures both tg (generation) and pp (prefill) tokens/sec from Ollama's
@@ -250,6 +339,8 @@ def run_ollama_benchmark(host, port, model, prompt, timeout=120, num_predict=Non
     options = {"temperature": 0, "seed": 42}
     if num_predict is not None:
         options["num_predict"] = num_predict
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
 
     payload = {
         "model": model,
@@ -380,11 +471,13 @@ def run_node_benchmark(node_name, node_config, models_to_test, suite_name, suite
         print("ready")
 
         for test in suite:
+            test_timeout = max(test.get("timeout", timeout), timeout)
             print(f"    [{test['id']}] {test['name']}...", end=" ", flush=True)
             result = run_ollama_benchmark(
                 host, port, model, test["prompt"],
-                timeout=timeout,
+                timeout=test_timeout,
                 num_predict=test.get("num_predict"),
+                num_ctx=test.get("num_ctx"),
             )
 
             record = {
@@ -395,6 +488,7 @@ def run_node_benchmark(node_name, node_config, models_to_test, suite_name, suite
                 "test_id": test["id"],
                 "test_name": test["name"],
                 "suite": suite_name,
+                "num_ctx": test.get("num_ctx"),
                 **result,
             }
             run_results.append(record)

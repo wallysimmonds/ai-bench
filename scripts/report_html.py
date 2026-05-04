@@ -22,6 +22,17 @@ ROOT = Path(__file__).parent.parent
 REPORTS_DIR = ROOT / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
+# ── Known coverage gaps with explanations ─────────────────────────────────────
+# (node, model) → reason string shown in the coverage matrix
+_COVERAGE_NOTES = {
+    ("amd-ai",    "qwen3.5:27b"):     "Removed — offloads to RAM, ~2.8 TG tok/s",
+    ("amd-ai",    "qwen3.6:27b"):     "Removed — offloads to RAM, ~2.8 TG tok/s",
+    ("nvidia-ai", "qwen3.5:122b"):    "Excluded — 81 GB offload over PCIe, 4K ctx timed out at 600 s",
+    ("nvidia-ai", "gpt-oss:120b"):    "TG unusable — PCIe offload 0.9–1.2 tok/s",
+    ("nvidia-ai", "llama3.3:70b"):    "TG unusable — PCIe offload 0.3–0.7 tok/s",
+    ("nvidia-ai", "deepseek-r1:70b"): "TG unusable — PCIe offload 0.2–0.7 tok/s",
+}
+
 
 # ── Model metadata ────────────────────────────────────────────────────────────
 
@@ -144,6 +155,24 @@ def aggregate_context_scaling(records):
     return ctx_perf
 
 
+def aggregate_ollama_context_scaling(records):
+    """Group PP results from the long_context suite by (model, node, num_ctx)."""
+    ctx_perf = defaultdict(lambda: defaultdict(dict))
+    for r in records:
+        if r.get("suite") != "long_context":
+            continue
+        if r.get("error"):
+            continue
+        num_ctx = r.get("num_ctx")
+        pp      = r.get("pp_tokens_per_sec")
+        if not num_ctx or not pp:
+            continue
+        model = r["model"]
+        node  = r["node"]
+        ctx_perf[model][node][num_ctx] = max(ctx_perf[model][node].get(num_ctx, 0), pp)
+    return ctx_perf
+
+
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 
 def fmt(val, unit=""):
@@ -180,12 +209,14 @@ def th(*cols):
     ) + "</tr>"
 
 
-def section(title, content, anchor="", subtitle=""):
-    sub = f'<span class="section-sub">{subtitle}</span>' if subtitle else ""
-    a   = f'<a name="{anchor}"></a>' if anchor else ""
+def section(title, content, anchor="", subtitle="", note=""):
+    sub      = f'<span class="section-sub">{subtitle}</span>' if subtitle else ""
+    note_div = f'<div class="section-note">{note}</div>' if note else ""
+    a        = f'<a name="{anchor}"></a>' if anchor else ""
     return f'''{a}
   <div class="section">
     <div class="section-title">{title}{sub}</div>
+    {note_div}
     {content}
   </div>'''
 
@@ -445,6 +476,99 @@ def llama_raw(records):
     return card(table(thead, rows or empty(6)))
 
 
+# ── Fleet coverage matrix ─────────────────────────────────────────────────────
+
+def fleet_coverage_html(ollama_records, meta):
+    """Node × model matrix showing what ran, what was excluded, and why."""
+    import yaml
+    try:
+        with open(ROOT / "config" / "models.yaml") as f:
+            cfg = yaml.safe_load(f)
+        node_models_cfg = cfg.get("node_models", {})
+    except Exception:
+        return ""
+
+    all_nodes = sorted(node_models_cfg.keys())
+
+    # Collect all models referenced in config in canonical meta order
+    all_models_in_cfg = sorted(
+        set(m for models in node_models_cfg.values() for m in models),
+        key=lambda m: model_order_key(m, meta)
+    )
+
+    # Count ok/error results per (node, model) across standard suite only
+    ok_counts  = defaultdict(int)
+    err_counts = defaultdict(int)
+    for r in ollama_records:
+        if r.get("suite") == "long_context":
+            continue
+        key = (r.get("node"), r.get("model"))
+        if r.get("error") or r.get("status") == "error":
+            err_counts[key] += 1
+        else:
+            ok_counts[key] += 1
+
+    configured = {
+        (node, m)
+        for node, models in node_models_cfg.items()
+        for m in models
+    }
+
+    node_heads = "".join(
+        f'<th style="padding:10px 14px;text-align:center;font-size:11px">{n}</th>'
+        for n in all_nodes
+    )
+    thead = (f'<tr><th style="padding:10px 14px;font-size:11px">Model</th>'
+             f'{node_heads}</tr>')
+
+    rows = ""
+    for i, model in enumerate(all_models_in_cfg):
+        _, badge = model_label(model, meta)
+        bg = 'style="background:rgba(255,255,255,0.018)"' if i % 2 == 0 else ""
+        cells = ""
+        for node in all_nodes:
+            key = (node, model)
+            ok  = ok_counts[key]
+            err = err_counts[key]
+            gap = _COVERAGE_NOTES.get(key)
+
+            if ok > 0 and not gap:
+                inner = f'<span class="cov-ok">✓</span> <span style="color:#4a5568;font-size:11px">{ok} runs</span>'
+            elif ok > 0 and gap:
+                # Has data but with a known caveat (e.g. TG unusable)
+                inner = (f'<span class="cov-warn">⚠</span> '
+                         f'<span style="color:#4a5568;font-size:11px">{ok} runs</span>'
+                         f'<span class="cov-note">{gap}</span>')
+            elif err > 0:
+                note = gap or f"{err} error{'s' if err > 1 else ''}"
+                inner = (f'<span class="cov-err">✗</span>'
+                         f'<span class="cov-note">{note}</span>')
+            elif key in configured:
+                note = gap or "configured, not yet run"
+                inner = (f'<span class="cov-warn">○</span>'
+                         f'<span class="cov-note">{note}</span>')
+            else:
+                if gap:
+                    inner = (f'<span class="cov-none">—</span>'
+                             f'<span class="cov-note">{gap}</span>')
+                else:
+                    inner = '<span class="cov-none">—</span>'
+
+            cells += f'<td style="padding:8px 14px;vertical-align:top">{inner}</td>'
+
+        rows += f'<tr {bg}><td class="td-model">{model}{badge}</td>{cells}</tr>'
+
+    legend = '''<div class="legend">
+      <span><span class="cov-ok">✓</span> Has benchmark data</span>
+      <span><span class="cov-warn">⚠</span> Ran but with known caveat</span>
+      <span><span class="cov-warn">○</span> Configured, not yet run</span>
+      <span><span class="cov-err">✗</span> All runs errored</span>
+      <span><span class="cov-none">—</span> Not configured for this node</span>
+    </div>'''
+
+    return card(f'<table><thead>{thead}</thead><tbody>{rows}</tbody></table>') + legend
+
+
 # ── Main report assembly ──────────────────────────────────────────────────────
 
 def build_report(ollama_records, llama_records):
@@ -465,6 +589,11 @@ def build_report(ollama_records, llama_records):
     l_tg, l_pp          = aggregate_llama(llama_records)
     ctx_perf            = aggregate_context_scaling(llama_records)
 
+    # Merge Ollama long_context results into context scaling
+    for model, nodes in aggregate_ollama_context_scaling(ollama_records).items():
+        for node, sizes in nodes.items():
+            ctx_perf[model][node].update(sizes)
+
     # Summary tables
     o_sum_html, o_peak_tg = ollama_summary_table(o_tg, o_pp, o_ttft, meta)
     l_sum_html, l_peak_tg = llama_summary_table(l_tg, l_pp, meta)
@@ -479,6 +608,9 @@ def build_report(ollama_records, llama_records):
     l_matrix_html = llama_matrix(l_tg)
     l_raw_html    = llama_raw(llama_records)
 
+    # Coverage matrix
+    coverage_html = fleet_coverage_html(ollama_records, meta)
+
     # Nav links
     nav_links = ""
     if ollama_records:
@@ -487,6 +619,8 @@ def build_report(ollama_records, llama_records):
         nav_links += '<a class="nav-link" href="#llamabench">llama-bench</a>'
     if ctx_html:
         nav_links += '<a class="nav-link" href="#context">Context Scaling</a>'
+    if coverage_html:
+        nav_links += '<a class="nav-link" href="#coverage">Coverage</a>'
 
     # Page
     html = f"""<!DOCTYPE html>
@@ -573,6 +707,22 @@ def build_report(ollama_records, llama_records):
   .td-ts    {{ padding: 8px 12px; color: #4a5568; font-size: 11px; }}
   .td-err   {{ padding: 8px 12px; color: #ef476f; font-size: 11px; }}
   .col-sub  {{ color: #4a5568; font-weight: 400; }}
+
+  /* Section explanatory notes */
+  .section-note {{ color: #718096; font-size: 13px; line-height: 1.6;
+                   margin-bottom: 18px; max-width: 860px; }}
+  .section-note strong {{ color: #a0aec0; font-weight: 600; }}
+
+  /* Coverage matrix */
+  .cov-ok   {{ color: #06d6a0; font-weight: 700; }}
+  .cov-warn {{ color: #ffd166; font-weight: 600; }}
+  .cov-err  {{ color: #ef476f; }}
+  .cov-none {{ color: #2d3748; }}
+  .cov-note {{ color: #4a5568; font-size: 11px; display: block; margin-top: 2px;
+               font-style: italic; }}
+  .legend   {{ display: flex; gap: 20px; margin-top: 12px; font-size: 12px;
+               color: #718096; flex-wrap: wrap; }}
+  .legend span {{ display: flex; align-items: center; gap: 6px; }}
 </style>
 </head>
 <body>
@@ -598,35 +748,80 @@ def build_report(ollama_records, llama_records):
 
 <div class="content">
 
-  <a name="summary"></a>
-  <div class="section">
-    <div class="section-title">Performance Summary
-      <span class="section-sub">best result per model across all nodes and tests</span>
-    </div>
-    <div class="summary-group">
+  {section(
+    "Performance Summary",
+    '<div class="summary-group">' +
+    ('<div><div class="summary-label">Ollama Benchmark</div>' + o_sum_html + '</div>' if ollama_records else '') +
+    ('<div><div class="summary-label">llama-bench &mdash; standardised pp512 / tg128 &mdash; 3-rep median</div>' + l_sum_html + '</div>' if llama_records else '') +
+    '</div>',
+    anchor="summary",
+    subtitle="best result per model/node pair across all runs",
+    note=(
+      '<strong>TG (token generation)</strong> — tokens produced per second during the generative (decode) phase. '
+      'This is the speed you feel when the model is streaming a reply. Higher is better. '
+      '<strong>PP (prefill)</strong> — tokens processed per second when ingesting the prompt. '
+      'Determines how quickly the model can "read" a long context before generating. '
+      'Not all models run on all nodes — see the <a href="#coverage" style="color:#90cdf4">Coverage</a> section for the full matrix and gap explanations.'
+    )
+  )}
 
-      {'<div><div class="summary-label">Ollama Benchmark</div>' + o_sum_html + '</div>'
-       if ollama_records else ''}
+  {section(
+    "Ollama Benchmark",
+    collapsible("Node × Model Matrix — TG tok/s", o_matrix_html) +
+    collapsible("Raw Results — all tests", o_raw_html),
+    anchor="ollama",
+    subtitle="drill-down",
+    note=(
+      'Results from <strong>benchmark.py</strong> running realistic generation tasks via the Ollama API. '
+      'Each test warms the model, then measures TG and PP using a timed streaming request. '
+      'The standard suite covers coding, reasoning, and general tasks across 1–3 runs per model per node. '
+      'Errors and timeouts are included in the raw results below.'
+    )
+  ) if ollama_records else ""}
 
-      {'<div><div class="summary-label">llama-bench &mdash; standardised pp512 / tg128 &mdash; 3-rep median</div>' + l_sum_html + '</div>'
-       if llama_records else ''}
+  {section(
+    "llama-bench",
+    collapsible("Node × Model Matrix — TG tok/s", l_matrix_html) +
+    collapsible("Raw Results — all runs", l_raw_html),
+    anchor="llamabench",
+    subtitle="drill-down",
+    note=(
+      'Results from <strong>llama-bench</strong>, the canonical llama.cpp microbenchmark. '
+      'Runs directly against GGUF files (bypassing Ollama), giving lower-level hardware throughput numbers. '
+      '<strong>PP is measured at 512-token prompt size</strong> and <strong>TG at 128-token generation</strong>, '
+      'with 3 repetitions and median reported. These numbers tend to be higher than Ollama equivalents '
+      'since they exclude API and sampling overhead.'
+    )
+  ) if llama_records else ""}
 
-    </div>
-  </div>
+  {section(
+    "Context Scaling",
+    ctx_html,
+    anchor="context",
+    subtitle="PP tok/s vs prompt length",
+    note=(
+      'Shows how <strong>prefill throughput degrades as context length grows</strong> — from 4K to 32K tokens. '
+      'A flat curve means the node handles long contexts efficiently; a steep drop indicates KV cache pressure '
+      'or memory bandwidth saturation. '
+      'Nodes with limited VRAM (amd-ai, nvidia-ai for large models) show earlier cliff edges as the KV cache '
+      'is evicted or the model itself is pushed into slower memory. '
+      'Unified-memory nodes (bosgame-m5) tend to degrade more gracefully since there is no PCIe boundary.'
+    )
+  ) if ctx_html else ""}
 
-  {'<a name="ollama"></a><div class="section"><div class="section-title">Ollama Benchmark <span class="section-sub">drill-down</span></div>' +
-   collapsible("Node × Model Matrix — TG tok/s", o_matrix_html) +
-   collapsible("Raw Results — all tests", o_raw_html) +
-   '</div>' if ollama_records else ''}
-
-  {'<a name="llamabench"></a><div class="section"><div class="section-title">llama-bench <span class="section-sub">drill-down</span></div>' +
-   collapsible("Node × Model Matrix — TG tok/s", l_matrix_html) +
-   collapsible("Raw Results — all runs", l_raw_html) +
-   '</div>' if llama_records else ''}
-
-  {'<a name="context"></a><div class="section"><div class="section-title">Context Scaling <span class="section-sub">PP tok/s vs prompt size — how prefill throughput degrades with context</span></div>' +
-   ctx_html +
-   '</div>' if ctx_html else ''}
+  {section(
+    "Fleet Coverage",
+    coverage_html,
+    anchor="coverage",
+    subtitle="which models ran on which nodes",
+    note=(
+      'Not every model is tested on every node — some combinations are intentionally excluded because they '
+      'produce unusable results (e.g. large models offloaded over PCIe on nvidia-ai), '
+      'and some are simply not configured for a node due to VRAM constraints. '
+      'This matrix shows the status of every model/node pair defined in <code style="color:#a0aec0">config/models.yaml</code>. '
+      'Hover over ⚠ and ✗ cells for details.'
+    )
+  ) if coverage_html else ""}
 
 </div>
 </body>

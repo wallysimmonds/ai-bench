@@ -162,19 +162,10 @@ node_models:
     - gpt-oss:120b
     - qwen3.5:122b
 
-  8700g-5060ti:
-    - qwen2.5-coder:7b
-    - qwen2.5-coder:14b
-    - qwen3.5:9b
-    - qwen3.5:27b
-    - qwen3.6:27b
-
   amd-ai:
     - qwen2.5-coder:7b
     - qwen2.5-coder:14b
     - qwen3.5:9b
-    - qwen3.5:27b
-    - qwen3.6:27b
 
   lenovo-gb10:
     - qwen2.5-coder:7b
